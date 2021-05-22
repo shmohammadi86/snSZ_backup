@@ -1,0 +1,82 @@
+---
+title: "Perform DE analysis"
+subtitle: "Step 1: Compute pseudobulk (PB) profiles"
+output: html_notebook
+---
+
+# Setup
+```{r include=FALSE}
+require(ACTIONet)
+require(stringr)
+require(ComplexHeatmap)
+require(muscat)
+
+
+dataset.path = "~/results/datasets/"
+results.path = "~/results"
+figures.folder = "~/results/figures"
+
+
+```
+
+# Read ACTIONet and convert to an SCE object
+```{r}
+ace = readr::read_rds("~/results/ACTIONet_reunified.rds")
+sce = as(ace, "SingleCellExperiment")
+
+```
+
+# Read metadata
+```{r}
+sample.metadata = readr::read_rds(file.path(dataset.path, "sample_metadata.rds"))
+ACTIONet_summary = readr::read_rds(file.path(dataset.path, "ACTIONet_summary.rds"))
+
+```
+
+
+
+
+
+```{r}
+ACTIONet_summary = readr::read_rds(file.path(dataset.path, "ACTIONet_summary_filtered_individuals.rds"))
+
+pb.logcounts = readr::read_rds(file.path(dataset.path, "PB_mean_logcounts_final.RDS"))
+
+color.df = readRDS(file.path(dataset.path, "celltype_colors.rds"))
+
+# color.df[c(22:24), ] = color.df[c(24, 23, 22), ]
+
+colors = color.df$color
+names(colors) = color.df$celltype
+
+
+ncells = sapply(int_colData(pb.logcounts)$n_cells, as.numeric)
+rownames(ncells) = names(assays(pb.logcounts))
+
+```
+
+
+# Use muscat to compute PB profiles
+```{r}
+sce$cluster_id = ACTIONet_summary$metadata$Labels
+sce$group_id = ACTIONet_summary$metadata$Phenotype
+sce$sample_id = ACTIONet_summary$metadata$Individual
+
+library(muscat)
+sce$id <- paste0(sce$Phenotype, sce$sample_id)
+(sce <- prepSCE(sce,
+    kid = "cluster_id", # subpopulation assignments
+    gid = "group_id",  # group IDs (ctrl/stim)
+    sid = "sample_id",   # sample IDs (ctrl/stim.1234)
+    drop = TRUE))  # drop all other colData columns
+
+pb.logcounts <- aggregateData(sce,
+    assay = "logcounts", fun = "mean",
+    by = c("cluster_id", "sample_id"))
+
+
+colData(pb.logcounts) = cbind(colData(pb.logcounts), sample.metadata[colnames(pb.logcounts), ])
+readr::write_rds(pb.logcounts, file = file.path(dataset.path, "PB_mean_logcounts_final.RDS"))
+
+```
+
