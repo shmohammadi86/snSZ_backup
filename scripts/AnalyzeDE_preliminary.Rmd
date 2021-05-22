@@ -218,3 +218,123 @@ dev.off()
 
 ```
 
+# Generate supplementary plots
+
+## Volcano plot
+### Excitatory neurons
+```{r}
+require(EnhancedVolcano)
+
+idx = grep("^Ex", colnames(DE.new$DE.sc))
+Grobs = vector("list", length(idx))
+for(i in 1:length(idx)) {
+  k = idx[[i]]
+  df = data.frame("log2FoldChange" = DE.new$logFC[, k], "pvalue" = 10^(-DE.new$logPvals[, k]))
+  rownames(df) = rownames(DE.new$DE.sc)
+  df = df[df$log2FoldChange != 0, ]
+  
+  keyvals <- rep('#cccccc', nrow(df))
+  names(keyvals) <- rep('None', nrow(df))
+  
+  keyvals[which( (df$log2FoldChange > 0.1) & (df$pvalue < 0.05) )] <- '#ca0020'
+  names(keyvals)[which( (df$log2FoldChange > 0.1) & (df$pvalue < 0.05) )] <- rep('Up', sum(keyvals == '#ca0020'))
+  
+  keyvals[which( (df$log2FoldChange < -0.1) & (df$pvalue < 0.05) )] <- '#0571b0'
+  names(keyvals)[which( (df$log2FoldChange < -0.1) & (df$pvalue < 0.05) )] <- rep('Down', sum(keyvals == '#0571b0'))
+  
+  
+ 
+ Grobs[[i]] = EnhancedVolcano(df,
+  lab = rownames(df),
+  x = 'log2FoldChange',
+  y = 'pvalue', pCutoff = 0.05, FCcutoff = 0.1, xlim = c(-0.6, 0.6), ylim = c(0, 5), title = "Excitatory neurons", subtitle = colnames(DE.new$logFC)[[k]], colCustom = keyvals, labCol = 'black',
+    labFace = 'bold', caption = "")
+}  
+
+
+pdf(file.path(figures.path, "Supp", "Volcano_Ex.pdf"), width = 8*4, height = 8*3)
+# png(file.path(figures.path, "Supp", "Volcano_Ex.png"), width = 2400, height = 1800, res = 150)
+gridExtra::grid.arrange( grobs = Grobs, nrow = 3)
+dev.off()
+
+```
+
+### Inhibitory neurons
+```{r}
+require(EnhancedVolcano)
+
+
+idx = grep("^In", colnames(DE.new$DE.sc))
+Grobs = vector("list", length(idx))
+for(i in 1:length(idx)) {
+  k = idx[[i]]
+  df = data.frame("log2FoldChange" = DE.new$logFC[, k], "pvalue" = 10^(-DE.new$logPvals[, k]))
+  rownames(df) = rownames(DE.new$DE.sc)
+  df = df[df$log2FoldChange != 0, ]
+  
+  keyvals <- rep('#cccccc', nrow(df))
+  names(keyvals) <- rep('None', nrow(df))
+  
+  keyvals[which( (df$log2FoldChange > 0.1) & (df$pvalue < 0.05) )] <- '#ca0020'
+  names(keyvals)[which( (df$log2FoldChange > 0.1) & (df$pvalue < 0.05) )] <- rep('Up', sum(keyvals == '#ca0020'))
+  
+  keyvals[which( (df$log2FoldChange < -0.1) & (df$pvalue < 0.05) )] <- '#0571b0'
+  names(keyvals)[which( (df$log2FoldChange < -0.1) & (df$pvalue < 0.05) )] <- rep('Down', sum(keyvals == '#0571b0'))
+  
+  
+ 
+ Grobs[[i]] = EnhancedVolcano(df,
+  lab = rownames(df),
+  x = 'log2FoldChange',
+  y = 'pvalue', pCutoff = 0.05, FCcutoff = 0.1, xlim = c(-0.6, 0.6), ylim = c(0, 5), title = "Inhibitory neurons", subtitle = colnames(DE.new$logFC)[[k]], colCustom = keyvals, labCol = 'black',
+    labFace = 'bold', caption = "")
+}  
+
+
+
+pdf(file.path(figures.path, "Supp", "Volcano_In.pdf"), width = 8*4, height = 8*2)
+# png(file.path(figures.path, "Supp", "Volcano_Ex.png"), width = 2400, height = 1800, res = 150)
+gridExtra::grid.arrange( grobs = Grobs, nrow = 2)
+dev.off()
+
+
+```
+
+### Glial cell types
+```{r}
+require(EnhancedVolcano)
+
+
+idx = which(!grepl("^In|^Ex", colnames(DE.new$DE.sc)))
+Grobs = vector("list", length(idx))
+for(i in 1:length(idx)) {
+  k = idx[[i]]
+  df = data.frame("log2FoldChange" = DE.new$logFC[, k], "pvalue" = 10^(-DE.new$logPvals[, k]))
+  rownames(df) = rownames(DE.new$DE.sc)
+  df = df[df$log2FoldChange != 0, ]
+  
+  keyvals <- rep('#cccccc', nrow(df))
+  names(keyvals) <- rep('None', nrow(df))
+  
+  keyvals[which( (df$log2FoldChange > 0.1) & (df$pvalue < 0.05) )] <- '#ca0020'
+  names(keyvals)[which( (df$log2FoldChange > 0.1) & (df$pvalue < 0.05) )] <- rep('Up', sum(keyvals == '#ca0020'))
+  
+  keyvals[which( (df$log2FoldChange < -0.1) & (df$pvalue < 0.05) )] <- '#0571b0'
+  names(keyvals)[which( (df$log2FoldChange < -0.1) & (df$pvalue < 0.05) )] <- rep('Down', sum(keyvals == '#0571b0'))
+  
+  
+ 
+ Grobs[[i]] = EnhancedVolcano(df,
+  lab = rownames(df),
+  x = 'log2FoldChange',
+  y = 'pvalue', pCutoff = 0.05, FCcutoff = 0.1, xlim = c(-0.6, 0.6), ylim = c(0, 5), title = "Non-neuronal", subtitle = colnames(DE.new$logFC)[[k]], colCustom = keyvals, labCol = 'black',
+    labFace = 'bold', caption = "")
+}  
+
+pdf(file.path(figures.path, "Supp", "Volcano_Glial.pdf"), width = 8*3, height = 8*1)
+# png(file.path(figures.path, "Supp", "Volcano_Ex.png"), width = 2400, height = 1800, res = 150)
+gridExtra::grid.arrange( grobs = Grobs, nrow = 1)
+dev.off()
+
+
+```
