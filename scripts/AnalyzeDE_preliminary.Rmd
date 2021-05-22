@@ -1,0 +1,220 @@
+---
+title: "Analyze DE genes"
+subtitle: "Step 3: Postprocessing the alignment of DE results across datasets"
+
+output: html_notebook
+---
+
+# Setup
+```{r include=FALSE}
+require(ACTIONet)
+require(stringr)
+require(ComplexHeatmap)
+
+
+results.path = "~/results"
+input.path = "~/results/input"
+dataset.path = "~/results/datasets"
+tables.path = "~/results/tables"
+figures.path = "~/results/figures"
+
+```
+
+
+## Enrichment function
+```{r}
+assess.genesets <-function (arch.gs, terms.gs, N, min.pval = 1e-100, correct = "none"){
+    shared = t(sapply(terms.gs, function(gs1) {
+        sapply(arch.gs, function(gs2) {
+            nn = intersect(gs1, gs2)
+        })
+    }))
+    colnames(shared) = names(arch.gs)
+    GS.sizes = sapply(terms.gs, length)
+    logPvals.out = sapply(1:ncol(shared), function(i) {
+        gg = shared[, i]
+        x = as.numeric(sapply(gg, length))
+        n.sample = length(arch.gs[[i]])
+        n.success = as.numeric(GS.sizes)
+        v = rep(1, length(x))
+        min.overlap = n.success * n.sample/N
+        idx = which(x >= min.overlap)
+        if (length(idx) == 0) 
+            return(v)
+        v[idx] = (phyper(x[idx]-1, n.sample, N-n.sample, n.success[idx], lower.tail = F))
+        # v[idx] = HGT_tail(population.size = N, success.count = n.success[idx], 
+        #     sample.size = n.sample, observed.success = x[idx])
+        return(v)
+    })
+    if(correct == "global") {
+      logPvals.out = matrix(p.adjust(logPvals.out, "fdr"), nrow = nrow(logPvals.out))
+    } else if(correct == "local") {
+      logPvals.out = apply(logPvals.out, 2, function(x) p.adjust(x, "fdr"))
+    }
+    rownames(logPvals.out) = names(terms.gs)
+    colnames(logPvals.out) = names(arch.gs)
+    return(-log10(Matrix::t(logPvals.out)))
+}
+```
+
+# Load primary datasets
+```{r, eval = T}
+ACTIONet_summary = readr::read_rds(file.path(dataset.path, "ACTIONet_summary_filtered_individuals.rds"))
+pb.logcounts = readr::read_rds(file.path(dataset.path, "PB_mean_logcounts_final.RDS"))
+
+color.df = readRDS(file.path(dataset.path, "celltype_colors.rds"))
+colors = color.df$color
+names(colors) = color.df$celltype
+
+```
+
+# Load DE results
+```{r, eval = T}
+resDE = readr::read_rds(file.path(dataset.path, "Cohort_specific_DE_results.rds"))
+filtered.tables = readr::read_rds(file.path(dataset.path, "Cohort_specific_DE_results_filtered.rds"))
+combined.analysis.tables = readr::read_rds(file.path(dataset.path, "meta_analysis_results.rds"))
+
+DE.new = readRDS(file.path(dataset.path, "DE_genes_pseudobulk.rds"))
+Up.genes = DE.new$Up.genes
+Down.genes = DE.new$Down.genes
+DE.sc = DE.new$DE.sc
+ordered.celltypes = rownames(X)[order(apply(X, 1, sum), decreasing = T)]
+
+```
+
+
+
+# Compute overlap of selected DE genes with bulk (PEC)
+```{r}
+SZ.genes = readr::read_rds(file.path(input.folder, "SCZ_associated_genesets.rds"))
+
+Up.genes.overlap = sapply(Up.genes, function(gs) intersect(gs, SZ.genes$`DE.Up (PEC)`))
+Up.genes.size = sapply(Up.genes.overlap, length) 
+Up.En = assess.genesets(Up.genes[ordered.celltypes], SZ.genes[c(5, 6)], nrow(pb.logcounts), correct = "local")[, 1]
+
+Down.genes.overlap = sapply(Down.genes, function(gs) intersect(gs, SZ.genes$`DE.Down (PEC)`))
+Down.genes.size = sapply(Down.genes.overlap, length) 
+Down.En = assess.genesets(Down.genes[ordered.celltypes], SZ.genes[c(5, 6)], nrow(pb.logcounts), correct = "local")[, 2]
+
+
+DE.overlap.tbl = data.frame(Celltype = ordered.celltypes, Up = sapply(Up.genes[ordered.celltypes], length), Up_vs_bulk_count = Up.genes.size, Up_vs_bulk_enrichment = Up.En, Down = sapply(Down.genes[ordered.celltypes], length), Down_vs_bulk_count = Down.genes.size, Down_vs_bulk_enrichment = Down.En)
+
+write.table(DE.overlap.tbl, file.path(tables.path, "DE_vs_bulk_overlap.tsv"), sep = "\t", row.names = F, col.names = T, quote = F)
+```
+
+
+# Plot the total number of DE genes
+```{r}
+celltype.colors = colors[names(Up.genes)]
+# names(celltype.colors) = names(Up.genes)
+
+df.Up = data.frame(Counts = sapply(Up.genes, function(x) length(setdiff(x, SZ.genes$`DE.Up (PEC)`))), Celltype = names(Up.genes), Direction="Up", Color = celltype.colors[names(Up.genes)], stringsAsFactors = F)
+
+df.UpandBulk = data.frame(Counts = sapply(Up.genes, function(x) length(intersect(x, SZ.genes$`DE.Up (PEC)`))), Celltype = names(Up.genes), Direction="Up & Bulk", Color = celltype.colors[names(Up.genes)], stringsAsFactors = F)
+
+
+df.Down = data.frame(Counts = -sapply(Down.genes, function(x) length(setdiff(x, SZ.genes$`DE.Down (PEC)`))), Celltype = names(Down.genes), Direction="Down", Color = celltype.colors[names(Down.genes)], stringsAsFactors = F)
+
+df.DownandBulk = data.frame(Counts = -sapply(Down.genes, function(x) length(intersect(x, SZ.genes$`DE.Down (PEC)`))), Celltype = names(Down.genes), Direction="Down & Bulk", Color = celltype.colors[names(Down.genes)], stringsAsFactors = F)
+
+
+
+df = rbind(df.Up, df.UpandBulk, df.Down, df.DownandBulk)
+
+total.Up = sapply(Up.genes, length)
+total.Down = sapply(Down.genes, length)
+
+set.seed(0)
+# total = total.Up + total.Down + 0.001*rnorm(length(Up.genes))
+total = apply(cbind(total.Up, total.Down), 1, max)
+
+arch.perm = order(total, decreasing = F)
+df$Celltype = factor(df$Celltype, rev(ordered.celltypes))
+
+pdf(file.path(figures.folder, "NumDysregGenes.pdf"), width = 8, height = 5)
+ggplot(data = df, aes(x = Celltype, y = Counts, fill = Direction)) + geom_bar(stat = "identity")+
+  coord_flip()+ylab("Sorted Celltypes")+
+labs(y = "# Genes", x = "Sorted Celltypes")+
+  theme_minimal()+
+  guides(fill = FALSE)+ scale_fill_manual(values=c("#3288bd", colorspace::darken("#3288bd", 0.35), "#d53e4f", colorspace::darken("#d53e4f", 0.35))) + theme(axis.text.y = element_text(face="bold", color=celltype.colors[levels(df$Celltype)], size=12, angle=0), axis.text.x = element_text(face="bold", color="black", size=12, angle=0), axis.title = element_text(face="bold", size=14, angle=0))
+dev.off()
+
+```
+
+
+# Visualize selected genes
+## Read bulk DE results
+```{r}
+PEC.DE = read.table(file.path(input.path, "PEC_DE_table.csv"), header = T)
+common.genes = intersect(rownames(pb.logcounts), PEC.DE$gene_name)
+PEC.tstat = PEC.DE$SCZ.t.value[match(common.genes, PEC.DE$gene_name)]
+names(PEC.tstat) = common.genes
+
+```
+
+## Plot heatmap
+```{r}
+selected.genes.tbl = read.xlsx(file.path(dataset.path, "Top50Genes.xlsx"))
+selected.genes = sort(unique(unlist(as.list(selected.genes.tbl))))
+selected.genes = intersect(selected.genes, names(PEC.tstat))
+
+X = DE.new$DE.sc[selected.genes, ]
+perm = order(fast_row_sums(X), decreasing = T)
+Y = as.matrix(PEC.tstat[selected.genes])
+colnames(Y) = c("Bulk")
+RdBu.pal = circlize::colorRamp2(seq(-3, 3, length.out = 7), rev(pals::brewer.rdbu(7)))
+
+pdf(file.path(figures.folder, "Top50_selected_DE_genes.pdf"), width = 6, height = 16)
+Heatmap(X[perm, ], cluster_rows = F, rect_gp = gpar(col = "black"), cluster_columns = F, column_title = "Celltypes", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(DE.new$DE.sc)]), name = "DE", col = RdBu.pal, row_names_side = "left") + Heatmap(Y[perm, ], cluster_rows = F, rect_gp = gpar(col = "black"), cluster_columns = F, name = "Bulk", col = RdBu.pal, row_names_side = "left")
+dev.off()
+
+```
+
+
+# Functional enrichment
+## Load annotations
+```{r}
+FunCat = readRDS(file.path(dataset.path, "FunCat.rds"))
+
+FunCat.genes = split(FunCat$FunCat2Gene$Gene, factor(FunCat$FunCat2Gene$Category, unique(FunCat$FunCat2Gene$Category)))[-15]
+names(FunCat.genes) = FunCat$FunCat2Class$Category
+
+FunCat.annotation = FunCat$FunCat2Class$Classification
+
+FunCatPal = ggpubr::get_palette("npg", length(unique(FunCat.annotation)))
+names(FunCatPal) = unique(FunCat.annotation)
+
+
+```
+
+## Perform enrichment
+```{r}
+Up.enrichment = assess.genesets(FunCat.genes, Up.genes[1:17], nrow(pb.logcounts), correct = "local")
+Down.enrichment = assess.genesets(FunCat.genes, Down.genes[1:17], nrow(pb.logcounts), correct = "local")
+
+Up.enrichment[Up.enrichment < -log10(0.05)] = 0
+Down.enrichment[Down.enrichment < -log10(0.05)] = 0
+
+ha_rows = rowAnnotation(df = list("Class" = FunCat.annotation), col = list("Class" = FunCatPal), annotation_legend_param = list("Class"=list(title_gp = gpar(fontsize = 0), labels_gp = gpar(fontsize = 10))))
+
+
+X.U = (Up.enrichment)
+# redCol_fun = circlize::colorRamp2(c(quantile(X.U, 0.25), quantile(X.U, 0.5), quantile(X.U, 0.85), quantile(X.U, 0.99)), c("#ffffff", "#fee5d9", "#ef3b2c", "#99000d"))
+redCol_fun = circlize::colorRamp2(c(0, exp(quantile(log(X.U)[X.U > -log10(0.05)], seq(0.05, 0.95, length.out = 12)))), c("#ffffff", pals::brewer.reds(12)))
+
+X.D = (Down.enrichment)
+# blueCol_fun = circlize::colorRamp2(c(quantile(X.D, 0.25), quantile(X.U, 0.5), quantile(X.D, 0.85), quantile(X.D, 0.99)), c( "#ffffff", "#9ecae1", "#2171b5", "#08306b"))
+
+blueCol_fun = circlize::colorRamp2(c(0, exp(quantile(log(X.D)[X.D > -log10(0.05)], seq(0.05, 0.95, length.out = 12)))), c("#ffffff", pals::brewer.blues(12)))
+
+# pals::brewer.reds()
+
+
+pdf(file.path(figures.folder, "DE_FunCat.pdf"), width = 14, height = 7)
+par(mar=c(0,150,0,0))
+Heatmap(X.U, rect_gp = gpar(col = "black"), name = "Up", column_title = "Up-regulated", cluster_rows = F, cluster_columns = F, col = redCol_fun, row_names_side = "left",  column_names_gp = gpar(fontsize = 14, fontface="bold", col = colors[colnames(X.U)]), row_names_gp = gpar(fontsize = 14, fontface="bold", col = FunCatPal[FunCat.annotation]), column_title_gp = gpar(fontsize = 18, fontface="bold"), row_title_gp = gpar(fontsize = 18, fontface="bold"), row_names_max_width = unit(150, "cm"), column_names_max_height = unit(150, "cm"))+
+Heatmap(X.D, rect_gp = gpar(col = "black"), name = "Down", cluster_rows = F, cluster_columns = F, col = blueCol_fun, row_names_side = "left", column_title = "Down-regulated",  column_names_gp = gpar(fontsize = 14, fontface="bold", col = colors[colnames(X.D)]), row_names_gp = gpar(fontsize = 14, fontface="bold", col = FunCatPal[FunCat.annotation]), column_title_gp = gpar(fontsize = 18, fontface="bold"), row_title_gp = gpar(fontsize = 18, fontface="bold"), right_annotation = ha_rows, row_names_max_width = unit(150, "cm"), column_names_max_height = unit(150, "cm"))
+dev.off()
+
+```
+

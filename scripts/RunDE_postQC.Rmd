@@ -1,0 +1,204 @@
+---
+title: "Analyze DE genes"
+subtitle: "Step 3: Postprocessing the alignment of DE results across datasets"
+
+output: html_notebook
+---
+
+Analyze individual DE results for consistency and alignment
+
+
+# Setup
+```{r include=FALSE}
+require(ACTIONet)
+require(stringr)
+require(ComplexHeatmap)
+
+
+results.path = "~/results"
+input.path = "~/results/input"
+dataset.path = "~/results/datasets"
+tables.path = "~/results/tables"
+figures.path = "~/results/figures"
+
+
+```
+
+
+## Enrichment function
+```{r}
+assess.genesets <-function (arch.gs, terms.gs, N, min.pval = 1e-100, correct = "none"){
+    shared = t(sapply(terms.gs, function(gs1) {
+        sapply(arch.gs, function(gs2) {
+            nn = intersect(gs1, gs2)
+        })
+    }))
+    colnames(shared) = names(arch.gs)
+    GS.sizes = sapply(terms.gs, length)
+    logPvals.out = sapply(1:ncol(shared), function(i) {
+        gg = shared[, i]
+        x = as.numeric(sapply(gg, length))
+        n.sample = length(arch.gs[[i]])
+        n.success = as.numeric(GS.sizes)
+        v = rep(1, length(x))
+        min.overlap = n.success * n.sample/N
+        idx = which(x >= min.overlap)
+        if (length(idx) == 0) 
+            return(v)
+        v[idx] = (phyper(x[idx]-1, n.sample, N-n.sample, n.success[idx], lower.tail = F))
+        # v[idx] = HGT_tail(population.size = N, success.count = n.success[idx], 
+        #     sample.size = n.sample, observed.success = x[idx])
+        return(v)
+    })
+    if(correct == "global") {
+      logPvals.out = matrix(p.adjust(logPvals.out, "fdr"), nrow = nrow(logPvals.out))
+    } else if(correct == "local") {
+      logPvals.out = apply(logPvals.out, 2, function(x) p.adjust(x, "fdr"))
+    }
+    rownames(logPvals.out) = names(terms.gs)
+    colnames(logPvals.out) = names(arch.gs)
+    return(-log10(Matrix::t(logPvals.out)))
+}
+```
+
+# Load primary datasets
+```{r, eval = T}
+ACTIONet_summary = readr::read_rds(file.path(dataset.path, "ACTIONet_summary_filtered_individuals.rds"))
+pb.logcounts = readr::read_rds(file.path(dataset.path, "PB_mean_logcounts_final.RDS"))
+
+color.df = readRDS(file.path(dataset.path, "celltype_colors.rds"))
+colors = color.df$color
+names(colors) = color.df$celltype
+
+```
+
+# Load DE results
+```{r, eval = T}
+resDE = readr::read_rds(file.path(dataset.path, "Cohort_specific_DE_results.rds"))
+filtered.tables = readr::read_rds(file.path(dataset.path, "Cohort_specific_DE_results_filtered.rds"))
+combined.analysis.tables = readr::read_rds(file.path(dataset.path, "meta_analysis_results.rds"))
+
+DE.new = readRDS(file.path(dataset.path, "DE_genes_pseudobulk.rds"))
+Up.genes = DE.new$Up.genes
+Down.genes = DE.new$Down.genes
+DE.sc = DE.new$DE.sc
+ordered.celltypes = rownames(X)[order(apply(X, 1, sum), decreasing = T)]
+
+```
+
+
+
+# Compute Storey's pi1 per dataset
+```{r}
+tstat.overlap = sapply(common.celltypes, function(celltype) {
+  df1 = resDE$McLean$table$PhenotypeSZ[[celltype]]
+  df2 = resDE$MtSinai$table$PhenotypeSZ[[celltype]]
+  common.genes = intersect(df1$gene, df2$gene)
+  t1 = df1$t[match(common.genes, df1$gene)]  
+  t2 = df2$t[match(common.genes, df2$gene)]  
+  
+  tt = cor.test(t1, t2)
+  
+  return(tt$statistic)
+})
+tstat.overlap[tstat.overlap < 0] = 0
+names(tstat.overlap) = common.celltypes
+
+X = cbind(sapply(DE.new$Up.genes, length),sapply(DE.new$Down.genes, length))
+ordered.celltypes = rownames(X)[order(apply(X, 1, sum), decreasing = T)]
+
+require(corrplot)
+PurPal = colorRampPalette(RColorBrewer::brewer.pal(9, "Purples"))(200)
+pdf(file.path(figures.path, "Supp", "Cohort_overlap.pdf"), width =3, height = 7)
+corrplot(as.matrix(tstat.overlap[ordered.celltypes]), is.corr = F, method = "pie", col = PurPal, cl.length = 5, outline = T, tl.col = "black", p.mat = as.matrix(p.adjust(pnorm(tstat.overlap[ordered.celltypes], lower.tail = F), "fdr")), insig = "blank", sig.level = 0.05)
+dev.off()
+
+
+library(qvalue)
+McLean.Pi1 = sapply(resDE$McLean$table$PhenotypeSZ, function(df) {
+  pvals = df$p_val
+  pi1 = 1 - qvalue(pvals)$pi0
+})
+
+MtSinai.Pi1 = sapply(resDE$MtSinai$table$PhenotypeSZ, function(df) {
+  pvals = df$p_val
+  pi1 = 1 - qvalue(pvals)$pi0
+})
+df = data.frame(Celltype = union(names(resDE$MtSinai$table$PhenotypeSZ), names(resDE$McLean$table$PhenotypeSZ)))
+rownames(df) = df$Celltype
+df$McLean = McLean.Pi1[df$Celltype]
+df$MtSinai = 0
+df[names(MtSinai.Pi1), "MtSinai"] = -MtSinai.Pi1
+df = df[rev(ordered.celltypes), ]
+df$Celltype = factor(df$Celltype, rev(ordered.celltypes))
+df2 = reshape2::melt(df)
+colnames(df2) = c("Celltype", "Dataset", "Pi1")
+
+gg = ggplot(data = df2, aes(x = Celltype, y = Pi1, fill = Dataset)) + geom_bar(stat = "identity")+
+  coord_flip()+ylab("Sorted Celltypes")+
+labs(y = "Storey's Pi1", x = "Sorted Celltypes")+
+  theme_minimal()+
+  guides(fill = FALSE)+ scale_fill_manual(values=c("#666666", "#cccccc")) + theme(axis.text.y = element_text(face="bold", color=colors[levels(df$Celltype)], size=12, angle=0), axis.text.x = element_text(face="bold", color="black", size=12, angle=0), axis.title = element_text(face="bold", size=14, angle=0)) + ylim(c(-0.4, 0.4))
+
+pdf(file.path(figures.path, "Supp", "Cohort_specific_Pi1.pdf"))
+plot(gg)
+dev.off()
+
+
+```
+
+# Overlap with bulk (PEC)
+```{r}
+PEC.DE = read.table(file.path(input.path, "PEC_DE_table.csv"), header = T)
+common.genes = intersect(rownames(pb.logcounts), PEC.DE$gene_name)
+PEC.tstat = PEC.DE$SCZ.t.value[match(common.genes, PEC.DE$gene_name)]
+names(PEC.tstat) = common.genes
+
+McLean.PEC.cor.pvals = sapply(resDE$McLean$table$PhenotypeSZ, function(DF) {
+  tstats = DF$t
+  names(tstats) = DF$gene
+  cg = intersect(common.genes, DF$gene)
+  x = -log10(cor.test(tstats[cg], PEC.tstat[cg], method = "spearman")$p.value)
+  
+  return(x)
+})
+
+
+MtSinai.PEC.cor.pvals = sapply(resDE$MtSinai$table$PhenotypeSZ, function(DF) {
+  tstats = DF$t
+  names(tstats) = DF$gene
+  cg = intersect(common.genes, DF$gene)
+  x = -log10(cor.test(tstats[cg], PEC.tstat[cg], method = "spearman")$p.value)
+  
+  return(x)
+})
+
+PEC.overlap.df = data.frame(Celltypes = names(resDE$MtSinai$table$PhenotypeSZ), McLean.PEC = McLean.PEC.cor.pvals[names(resDE$MtSinai$table$PhenotypeSZ)], MtSinai.PEC = -MtSinai.PEC.cor.pvals[names(resDE$MtSinai$table$PhenotypeSZ)])
+df2 = reshape2::melt(PEC.overlap.df)
+colnames(df2) = c("Celltype", "Dataset", "Enrichment")
+df2$Dataset = factor(as.character(df2$Dataset), c("McLean.PEC", "MtSinai.PEC"))
+df2$Celltype = factor(df2$Celltype, rev(ordered.celltypes))
+
+
+
+gg = ggplot(data = df2, aes(x = Celltype, y = Enrichment, fill = Dataset)) + geom_bar(stat = "identity")+
+  coord_flip()+ylab("Sorted Celltypes")+
+labs(y = "Bulk Enrichment", x = "Sorted Celltypes")+
+  theme_minimal()+
+  guides(fill = FALSE)+ scale_fill_manual(values=c("#666666", "#cccccc")) + theme(axis.text.y = element_text(face="bold", color=colors[levels(df$Celltype)], size=12, angle=0), axis.text.x = element_text(face="bold", color="black", size=12, angle=0), axis.title = element_text(face="bold", size=14, angle=0))
+
+pdf(file.path(figures.path, "Supp", "Cohort_specific_overlap_with_PEC_bulk.pdf"))
+plot(gg)
+dev.off()
+
+# require(ggpubr)
+# gg =ggbarplot(df2, "Celltype", "Enrichment", fill = "Dataset", color = "black", palette = c("#666666", "#cccccc"),
+#   position = position_dodge(0.9), xlab = "Celltype", ylab = "Enrichment")+ theme(axis.text.x = element_text(face="bold", size=8, angle=90,hjust=0.95,vjust=0.2, color = colors[levels(df2$Celltype)]), axis.text.y = element_text(face="bold", size=12, angle=0), axis.title = element_text(face="bold", size=18, angle=0))
+# 
+# pdf(file.path(figures.path, "Supp", "Cohort_specific_overlap_with_PEC_bulk.pdf"))
+# plot(gg)
+# dev.off()
+
+```
+
+

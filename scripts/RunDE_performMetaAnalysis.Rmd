@@ -16,9 +16,11 @@ require(edgeR)
 require(limma)
 
 results.path = "~/results"
+input.path = "~/results/input"
 dataset.path = "~/results/datasets"
 tables.path = "~/results/tables"
 figures.path = "~/results/figures"
+
 
 dev_threshold = 1 # logFC needs to be 1 std away from 0 (in both datasets) prior to metanalysis
 
@@ -231,14 +233,6 @@ readr::write_rds(combined.analysis.tables, file.path(dataset.path, "meta_analysi
 
 ```
 
-
-
-```{r eval=FALSE, include=FALSE}
-resDE = readr::read_rds(file.path(dataset.path, "Cohort_specific_DE_results.rds"))
-filtered.tables = readr::read_rds(file.path(dataset.path, "Cohort_specific_DE_results_filtered.rds"))
-combined.analysis.tables = readr::read_rds(file.path(dataset.path, "meta_analysis_results.rds"))
-
-```
 
 # Export final tables
 ```{r}
