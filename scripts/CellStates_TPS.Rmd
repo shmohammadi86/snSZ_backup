@@ -1,0 +1,244 @@
+---
+title: "Fig3: H-MAGMA analysis"
+output: html_notebook
+---
+# Setup
+```{r include=FALSE}
+library(org.Hs.eg.db)
+require(ACTIONet)
+require(stringr)
+require(ComplexHeatmap)
+
+
+results.path = "~/results"
+input.path = "~/results/input"
+dataset.path = "~/results/datasets"
+tables.path = "~/results/tables"
+figures.path = "~/results/figures"
+
+
+```
+
+## Enrichment function
+```{r}
+assess.genesets <-function (arch.gs, terms.gs, N, min.pval = 1e-100, correct = "none"){
+    shared = t(sapply(terms.gs, function(gs1) {
+        sapply(arch.gs, function(gs2) {
+            nn = intersect(gs1, gs2)
+        })
+    }))
+    colnames(shared) = names(arch.gs)
+    GS.sizes = sapply(terms.gs, length)
+    logPvals.out = sapply(1:ncol(shared), function(i) {
+        gg = shared[, i]
+        x = as.numeric(sapply(gg, length))
+        n.sample = length(arch.gs[[i]])
+        n.success = as.numeric(GS.sizes)
+        v = rep(1, length(x))
+        min.overlap = n.success * n.sample/N
+        idx = which(x >= min.overlap)
+        if (length(idx) == 0) 
+            return(v)
+        v[idx] = (phyper(x[idx]-1, n.sample, N-n.sample, n.success[idx], lower.tail = F))
+        # v[idx] = HGT_tail(population.size = N, success.count = n.success[idx], 
+        #     sample.size = n.sample, observed.success = x[idx])
+        return(v)
+    })
+    if(correct == "global") {
+      logPvals.out = matrix(p.adjust(logPvals.out, "fdr"), nrow = nrow(logPvals.out))
+    } else if(correct == "local") {
+      logPvals.out = apply(logPvals.out, 2, function(x) p.adjust(x, "fdr"))
+    }
+    rownames(logPvals.out) = names(terms.gs)
+    colnames(logPvals.out) = names(arch.gs)
+    return(-log10(Matrix::t(logPvals.out)))
+}
+```
+
+# Load primary datasets
+```{r, eval = T}
+ACTIONet_summary = readr::read_rds(file.path(dataset.path, "ACTIONet_summary_filtered_individuals.rds"))
+pb.logcounts = readr::read_rds(file.path(dataset.path, "PB_mean_logcounts_final.RDS"))
+
+color.df = readRDS(file.path(dataset.path, "celltype_colors.rds"))
+colors = color.df$color
+names(colors) = color.df$celltype
+
+```
+
+
+# Load DE results
+```{r, eval = T}
+resDE = readr::read_rds(file.path(dataset.path, "Cohort_specific_DE_results.rds"))
+filtered.tables = readr::read_rds(file.path(dataset.path, "Cohort_specific_DE_results_filtered.rds"))
+combined.analysis.tables = readr::read_rds(file.path(dataset.path, "meta_analysis_results.rds"))
+
+DE.new = readRDS(file.path(dataset.path, "DE_genes_pseudobulk.rds"))
+Up.genes = DE.new$Up.genes
+Down.genes = DE.new$Down.genes
+DE.sc = DE.new$DE.sc
+ordered.celltypes = rownames(X)[order(apply(X, 1, sum), decreasing = T)]
+
+```
+
+
+# Compute transcriptional deviation scores
+```{r}
+common.genes = intersect(rownames(DE.new$DE.sc), rownames(pb.logcounts))
+X.DE = DE.new$DE.sc[common.genes, ]
+Z.DE = scale(X.DE)
+
+idx = match(colnames(Z.DE), names(assays(pb.logcounts)))
+scores = sapply(1:ncol(Z.DE), function(i) {
+  print(i)
+  
+	Z = scale(assays(pb.logcounts)[[idx[[i]]]][common.genes, ])
+	Z[is.na(Z)] = 0
+
+	Z.ortho = orthoProject(Z, Matrix::rowMeans(Z))
+	Z.ortho[is.na(Z.ortho)] = 0
+
+	cc = (Matrix::t(Z.ortho) %*% Z.DE[, i]) / nrow(Z.DE)
+})
+colnames(scores) = colnames(Z.DE)
+rownames(scores) = colnames(pb.logcounts)
+
+# TPS = fast_row_sums(scores[, grepl("Ex-|In-", colnames(scores)) & !grepl("NRGN", colnames(scores))])
+TPS = fast_row_sums(scores)
+# TPS = fast_row_sums(scores[, grepl("Ex-", colnames(scores)) & !grepl("NRGN", colnames(scores))])
+cor(TPS, pb.logcounts$A17.signature, method = "spearman")
+
+pb.logcounts$TPS = TPS
+
+```
+
+# Compute enrichmen of SZ phenotype among top-ranked TPS scores
+```{r}
+SZ.inds = list(SZ = as.character(pb.logcounts$ID[which(pb.logcounts$Phenotype == "SZ")]))
+
+v = pb.logcounts$TPS
+names(v) = pb.logcounts$ID
+
+all.enrichment = fgsea::fgsea(SZ.inds, v)
+pdf(file.path(figures.path, "Supp", "TPS_all_vs_Pheno_GSEA.pdf"), height = 4)
+plotEnrichment(SZ.inds$SZ, v)+ labs(title=sprintf("TPS-vs-Phenotype (adjusted p-val = %.2e)", all.enrichment$padj))
+dev.off()
+
+
+```
+# Filter samples
+```{r}
+ncells = sapply(int_colData(pb.logcounts)$n_cells, as.numeric)
+rownames(ncells) = names(assays(pb.logcounts))
+
+cs = Matrix::colSums(ncells)
+ncells.freq = 100*scale(ncells, center = F, scale = cs)
+Ex.perc = (fast_column_sums(ncells.freq[grepl("^Ex", rownames(ncells.freq)) & !grepl("^Ex-NRGN", rownames(ncells.freq)), ]))
+
+mask = (Ex.perc >= 10) & (Ex.perc <= 80)
+
+
+pb.logcounts.filtered = pb.logcounts [, mask]
+
+```
+
+
+```{r}
+require(ggpubr)
+df = data.frame(TPS = scale(pb.logcounts.filtered$TPS.Neuro), SZTR = scale(pb.logcounts.filtered$A17.signature), Phenotype = pb.logcounts.filtered$Phenotype, ID = pb.logcounts.filtered$ID)
+df$Label = ""
+TPS.mask = ((df$TPS >1) & (df$Phenotype == "CON")) | ((df$TPS < -1) & (df$Phenotype == "SZ"))
+df$Label[TPS.mask] = as.character(df$ID[TPS.mask])
+
+
+gg = ggscatter(df, x = "TPS", y = "SZTR", 
+          color = "Phenotype",
+          palette = c("CON" = "lightgray", "SZ" = "red"),
+          label = "Label", repel = TRUE,
+          add = "reg.line",                                 # Add regression line
+          conf.int = TRUE,                                  # Add confidence interval
+          add.params = list(color = "blue",
+                            fill = "lightgray")
+          ) + geom_vline(xintercept = -1, linetype = "dashed", color="gray") + geom_vline(xintercept = 1, linetype = "dashed", color="gray")+
+  stat_cor(method = "pearson", label.x = -0.8)#  +xlim(c(-2, 2)) + ylim(c(-2, 2))
+
+pdf(file.path(figures.path, "Supp", "TPS_vs_SZTR.pdf"), width = 6, height = 6)
+print(gg)
+dev.off()
+
+
+```
+
+
+
+# Visualize
+## Without PRS (All)
+```{r}
+ll.common = intersect(names(colors), colnames(scores))
+selected.colors = colors[ll.common]
+
+sub.scores = scores[mask, match(ll.common, colnames(scores))]
+
+pheno = factor(pb.logcounts.filtered$Phenotype)
+SZTR.mean = scale(pb.logcounts.filtered$A17.signature)
+TPS = pb.logcounts.filtered$TPS.All
+PRS = scale(pb.logcounts.filtered$PRS)
+perm = order(TPS, decreasing = T)
+names(TPS) = pb.logcounts.filtered$ID
+
+
+
+pdf(file.path(figures.path, "TPS_heatmap_all.pdf"), height = 24, width = 6)
+Heatmap(TPS[perm], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "TPS", rect_gp = gpar(col = "black")) + Heatmap(sub.scores[perm, grep("^Ex", colnames(sub.scores))], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "Ex", column_title =  "Ex", rect_gp = gpar(col = "black"), column_names_gp = gpar(col = selected.colors[grep("^Ex", colnames(sub.scores))])) + Heatmap(sub.scores[perm, grep("^In", colnames(sub.scores))], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "In", column_title = "In", rect_gp = gpar(col = "black"), column_names_gp = gpar(col = selected.colors[grep("^In", colnames(sub.scores))])) + Heatmap(sub.scores[perm, !grepl("^Ex|^In", colnames(sub.scores))], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "Glial", column_title = "Glial", rect_gp = gpar(col = "black"), column_names_gp = gpar(col = selected.colors[!grepl("^Ex|^In", colnames(sub.scores))])) + Heatmap(pheno[perm], col = c("lightgray", "red"), name = "Phenotype", rect_gp = gpar(col = "black")) + Heatmap(SZTR.mean[perm], name = "SZTR", rect_gp = gpar(col = "black"), col = inferno(500))
+dev.off()
+
+
+
+
+pdf(file.path(figures.path, "TPS_heatmap_all_neuro.pdf"), height = 24, width = 5)
+Heatmap(TPS[perm], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "TPS", rect_gp = gpar(col = "black")) + Heatmap(sub.scores[perm, grep("^Ex", colnames(sub.scores))], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "Ex", column_title =  "Ex", rect_gp = gpar(col = "black"), column_names_gp = gpar(col = selected.colors[grep("^Ex", colnames(sub.scores))])) + Heatmap(sub.scores[perm, grep("^In", colnames(sub.scores))], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "In", column_title = "In", rect_gp = gpar(col = "black"), column_names_gp = gpar(col = selected.colors[grep("^In", colnames(sub.scores))])) + Heatmap(pheno[perm], col = c("lightgray", "red"), name = "Phenotype", rect_gp = gpar(col = "black")) + Heatmap(SZTR.mean[perm], name = "SZTR", rect_gp = gpar(col = "black"), col = inferno(500))
+dev.off()
+
+
+```
+
+### Only Eur + PRS
+```{r}
+ll.common = intersect(names(colors), colnames(scores))
+selected.colors = colors[ll.common]
+
+sub.scores = scores[mask, match(ll.common, colnames(scores))]
+
+
+pheno = factor(pb.logcounts.filtered$Phenotype)
+SZTR.mean = scale(pb.logcounts.filtered$A17.signature)
+TPS = pb.logcounts.filtered$TPS.Neuro
+PRS = scale(pb.logcounts.filtered$PRS)
+perm = order(TPS, decreasing = T)
+names(TPS) = pb.logcounts.filtered$ID
+
+# require(viridis)
+# pdf(file.path(figures.path, "TPS_heatmap_plus_PRS.pdf"), height = 24, width = 5)
+# Heatmap(TPS[perm], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "TPS", rect_gp = gpar(col = "black")) + Heatmap(sub.scores[perm, grep("^Ex", colnames(sub.scores))], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "Ex", column_title =  "Ex", rect_gp = gpar(col = "black"), column_names_gp = gpar(col = selected.colors[grep("^Ex", colnames(sub.scores))])) + Heatmap(sub.scores[perm, grep("^In", colnames(sub.scores))], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "In", column_title = "In", rect_gp = gpar(col = "black"), column_names_gp = gpar(col = selected.colors[grep("^In", colnames(sub.scores))])) + Heatmap(pheno[perm], col = c("lightgray", "red"), name = "Phenotype", rect_gp = gpar(col = "black")) + Heatmap(SZTR.mean[perm], name = "SZTR", rect_gp = gpar(col = "black"), col = magma(500)) + Heatmap(PRS[perm], name = "PRS", rect_gp = gpar(col = "black"))
+# dev.off()
+
+
+
+
+
+
+pdf(file.path(figures.path, "TPS_heatmap_plus_PRS.pdf"), height = 24, width = 6)
+Heatmap(TPS[perm], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "TPS", rect_gp = gpar(col = "black")) + Heatmap(sub.scores[perm, grep("^Ex", colnames(sub.scores))], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "Ex", column_title =  "Ex", rect_gp = gpar(col = "black"), column_names_gp = gpar(col = selected.colors[grep("^Ex", colnames(sub.scores))])) + Heatmap(sub.scores[perm, grep("^In", colnames(sub.scores))], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "In", column_title = "In", rect_gp = gpar(col = "black"), column_names_gp = gpar(col = selected.colors[grep("^In", colnames(sub.scores))])) + Heatmap(sub.scores[perm, !grepl("^Ex|^In", colnames(sub.scores))], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "Glial", column_title = "Glial", rect_gp = gpar(col = "black"), column_names_gp = gpar(col = selected.colors[!grepl("^Ex|^In", colnames(sub.scores))])) + Heatmap(pheno[perm], col = c("lightgray", "red"), name = "Phenotype", rect_gp = gpar(col = "black")) + Heatmap(SZTR.mean[perm], name = "SZTR", rect_gp = gpar(col = "black"), col = magma(500)) + Heatmap(PRS[perm], name = "PRS", rect_gp = gpar(col = "black"))
+dev.off()
+
+
+pdf(file.path(figures.path, "TPS_heatmap_plus_PRS_neuro.pdf"), height = 24, width = 5)
+Heatmap(TPS[perm], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "TPS", rect_gp = gpar(col = "black")) + Heatmap(sub.scores[perm, grep("^Ex", colnames(sub.scores))], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "Ex", column_title =  "Ex", rect_gp = gpar(col = "black"), column_names_gp = gpar(col = selected.colors[grep("^Ex", colnames(sub.scores))])) + Heatmap(sub.scores[perm, grep("^In", colnames(sub.scores))], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "In", column_title = "In", rect_gp = gpar(col = "black"), column_names_gp = gpar(col = selected.colors[grep("^In", colnames(sub.scores))])) + Heatmap(pheno[perm], col = c("lightgray", "red"), name = "Phenotype", rect_gp = gpar(col = "black")) + Heatmap(SZTR.mean[perm], name = "SZTR", rect_gp = gpar(col = "black"), col = magma(500)) + Heatmap(PRS[perm], name = "PRS", rect_gp = gpar(col = "black"))
+dev.off()
+
+
+
+
+```
+
+

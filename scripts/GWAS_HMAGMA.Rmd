@@ -183,7 +183,9 @@ trait.labels = c("Schizophrenia (SZ)", "Bipolar (BP)","Autism (ASD)", "ADHD", "D
 X = HMAGMA.Pvals$UpAndDown[, selected.traits]
 cts = intersect(color.df$celltype, rownames(X))
 X = X[cts, ]
-X = apply(X, 2, function(p) p.adjust(p, "fdr"))
+X = matrix(p.adjust(as.numeric(X), "fdr"), nrow = length(cts))
+rownames(X) = cts
+# X = apply(X, 2, function(p) p.adjust(p, "fdr"))
 rownames(X) = intersect(names(colors), rownames(X))
 X = -log10(X)
 X[X < -log10(0.05)] = 0
@@ -195,13 +197,13 @@ PurPal = c(rep(PurPal[1], length(PurPal)*(sum(X < 1) / length(X))), PurPal)
 
 require(corrplot)
 pdf(file.path(figures.path, "HMAGMA_adultBrain.pdf"), width =7, height = 7)
-corrplot(X, is.corr = F, method = "pie", col = PurPal, cl.lim = c(0, 5), cl.length = 5, outline = T, sig.level = 0.05, p.mat = 10^(-X), insig = "blank", tl.col = "black")
+corrplot(X, is.corr = F, method = "pie", col = PurPal, cl.lim = c(0, 4), cl.length = 5, outline = T, sig.level = 0.05, p.mat = 10^(-X), insig = "blank", tl.col = "black")
 dev.off()
 
 X = X[grep("^In|^Ex", rownames(X)), ]
 require(corrplot)
 pdf(file.path(figures.path, "HMAGMA_adultBrain_neuro.pdf"), width =7, height = 7)
-corrplot(X, is.corr = F, method = "pie", col = PurPal, cl.lim = c(0, 5), cl.length = 5, outline = T, sig.level = 0.05, p.mat = 10^(-X), insig = "blank", tl.col = "black")
+corrplot(X, is.corr = F, method = "pie", col = PurPal, cl.lim = c(0, 4), cl.length = 5, outline = T, sig.level = 0.05, p.mat = 10^(-X), insig = "blank", tl.col = "black")
 dev.off()
 
 ```
