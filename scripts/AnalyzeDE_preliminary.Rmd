@@ -78,7 +78,7 @@ DE.new = readRDS(file.path(dataset.path, "DE_genes_pseudobulk.rds"))
 Up.genes = DE.new$Up.genes
 Down.genes = DE.new$Down.genes
 DE.sc = DE.new$DE.sc
-ordered.celltypes = rownames(X)[order(apply(X, 1, sum), decreasing = T)]
+# ordered.celltypes = rownames(X)[order(apply(X, 1, sum), decreasing = T)]
 
 ```
 
@@ -86,7 +86,7 @@ ordered.celltypes = rownames(X)[order(apply(X, 1, sum), decreasing = T)]
 
 # Compute overlap of selected DE genes with bulk (PEC)
 ```{r}
-SZ.genes = readr::read_rds(file.path(input.folder, "SCZ_associated_genesets.rds"))
+SZ.genes = readr::read_rds(file.path(input.path, "SCZ_associated_genesets.rds"))
 
 Up.genes.overlap = sapply(Up.genes, function(gs) intersect(gs, SZ.genes$`DE.Up (PEC)`))
 Up.genes.size = sapply(Up.genes.overlap, length) 
@@ -155,6 +155,7 @@ names(PEC.tstat) = common.genes
 ## Plot heatmap
 ```{r}
 selected.genes.tbl = read.xlsx(file.path(dataset.path, "Top50Genes.xlsx"))
+
 selected.genes = sort(unique(unlist(as.list(selected.genes.tbl))))
 selected.genes = intersect(selected.genes, names(PEC.tstat))
 
@@ -167,6 +168,50 @@ RdBu.pal = circlize::colorRamp2(seq(-3, 3, length.out = 7), rev(pals::brewer.rdb
 pdf(file.path(figures.path, "Top50_selected_DE_genes.pdf"), width = 6, height = 16)
 Heatmap(X[perm, ], cluster_rows = F, rect_gp = gpar(col = "black"), cluster_columns = F, column_title = "Celltypes", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(DE.new$DE.sc)]), name = "DE", col = RdBu.pal, row_names_side = "left") + Heatmap(Y[perm, ], cluster_rows = F, rect_gp = gpar(col = "black"), cluster_columns = F, name = "Bulk", col = RdBu.pal, row_names_side = "left")
 dev.off()
+
+```
+
+```{r}
+tbl = read.table("~/Top50genesForFig2b.csv", sep = ",", header = T)
+
+DE.sc.masked = DE.sc
+DE.sc.masked[ (DE.new$logPvals < -log10(0.05)) | (abs(DE.new$logFC) < 0.1) ] = 0
+
+hts = lapply(1:ncol(tbl), function(j) {
+  selected.genes = intersect(setdiff(tbl[1:10, j], ""), names(PEC.tstat))
+  
+  X = DE.sc.masked[selected.genes, ]
+  perm = order(fast_row_sums(X), decreasing = T)
+  
+  Y = as.matrix(PEC.tstat[selected.genes])
+  colnames(Y) = c("Bulk")
+  RdBu.pal = circlize::colorRamp2(seq(-3, 3, length.out = 7), rev(pals::brewer.rdbu(7)))
+  
+  ht = Heatmap(X[perm, ], cluster_rows = F, rect_gp = gpar(col = "black"), cluster_columns = F, column_title = "Celltypes", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(DE.new$DE.sc)]), name = colnames(tbl)[[j]], col = RdBu.pal, row_names_side = "left", row_title = colnames(tbl)[[j]], row_title_side = "left", row_title_gp = gpar(fontsize = 18)) 
+  
+  return(ht)
+})
+
+pdf(file.path(figures.path, "selected_DE_genes_splitted_v2.pdf"), height = 18)
+hts[[1]] %v% hts[[2]] %v% hts[[3]] %v% hts[[4]] %v% hts[[5]]
+dev.off()
+
+
+selected.genes = unlist(lapply(1:ncol(tbl), function(j) {
+  selected.genes = intersect(setdiff(tbl[1:10, j], ""), names(PEC.tstat))
+  
+  X = DE.sc.masked[selected.genes, ]
+  perm = order(fast_row_sums(X), decreasing = T)
+  selected.genes[perm]
+}))
+
+Y = as.matrix(PEC.tstat[selected.genes])
+colnames(Y) = c("Bulk")
+
+pdf(file.path(figures.path, "selected_DE_genes_splitted_matched_bulk_v2.pdf"), width = 1.8, height = 16)
+Heatmap(Y, cluster_rows = F, rect_gp = gpar(col = "black"), cluster_columns = F, name = "Bulk", col = RdBu.pal, row_names_side = "left")
+dev.off()
+
 
 ```
 
@@ -484,6 +529,7 @@ combined_enrichment.corrected.down = combined_enrichment.corrected.down[, fast_c
 
 ha_rows = rowAnnotation(df = list("Class" = FunCat.annotation), col = list("Class" = FunCatPal), annotation_legend_param = list("Class"=list(title_gp = gpar(fontsize = 0), labels_gp = gpar(fontsize = 10))))
 
+annots = c("Neurodevelopment", "Glutamate signaling", "Synaptic transmission", "Oxidative phosphorylation", "Synapse organization", "Autophagy", "Cellular stress response", "Postsynaptic organization", "Learning / Memory", "Cognition", "Catalytic activity", "Apoptosis")
 
 X.U = (combined_enrichment.corrected.up)
 redCol_fun = circlize::colorRamp2(c(0, exp(quantile(log(X.U)[X.U > -log10(0.05)], seq(0.05, 0.95, length.out = 12)))), c("#ffffff", pals::brewer.reds(12)))
@@ -491,13 +537,17 @@ redCol_fun = circlize::colorRamp2(c(0, exp(quantile(log(X.U)[X.U > -log10(0.05)]
 X.D = (combined_enrichment.corrected.down)
 blueCol_fun = circlize::colorRamp2(c(0, exp(quantile(log(X.D)[X.D > -log10(0.05)], seq(0.05, 0.95, length.out = 12)))), c("#ffffff", pals::brewer.blues(12)))
 
-pdf(file.path(figures.path, "DE_gProfiler_Simplified.pdf"), width = 5, height = 6)
+row.names(X.U) = rownames(X.D) = annots
+
+pdf(file.path(figures.path, "DE_gProfiler_Simplified_annotated.pdf"), width = 6.5, height = 5)
 par(mar=c(0,150,0,0))
-Heatmap(X.U, rect_gp = gpar(col = "black"), name = "Up", column_title = "Up", cluster_rows = F, cluster_columns = F, col = redCol_fun, row_names_side = "left",  column_names_gp = gpar(fontsize = 14, fontface="bold", col = colors[colnames(X.U)]), row_names_gp = gpar(fontsize = 14, fontface="bold", col = FunCatPal[FunCat.annotation]), column_title_gp = gpar(fontsize = 18, fontface="bold"), row_title_gp = gpar(fontsize = 18, fontface="bold"), row_names_max_width = unit(150, "cm"), column_names_max_height = unit(150, "cm"))+
-Heatmap(X.D, rect_gp = gpar(col = "black"), name = "Down", cluster_rows = F, cluster_columns = F, col = blueCol_fun, row_names_side = "left", column_title = "Down",  column_names_gp = gpar(fontsize = 14, fontface="bold", col = colors[colnames(X.D)]), row_names_gp = gpar(fontsize = 14, fontface="bold", col = FunCatPal[FunCat.annotation]), column_title_gp = gpar(fontsize = 18, fontface="bold"), row_title_gp = gpar(fontsize = 18, fontface="bold"), row_names_max_width = unit(150, "cm"), column_names_max_height = unit(150, "cm"))
+Heatmap(X.U, rect_gp = gpar(col = "black"), name = "Up", column_title = "Up", cluster_rows = F, cluster_columns = F, col = redCol_fun, row_names_side = "left",  column_names_gp = gpar(fontsize = 14, fontface="bold", col = colors[colnames(X.U)]), row_names_gp = gpar(fontsize = 14, fontface="bold"), column_title_gp = gpar(fontsize = 18, fontface="bold"), row_title_gp = gpar(fontsize = 18, fontface="bold"), row_names_max_width = unit(150, "cm"), column_names_max_height = unit(150, "cm"))+
+Heatmap(X.D, rect_gp = gpar(col = "black"), name = "Down", cluster_rows = F, cluster_columns = F, col = blueCol_fun, row_names_side = "left", column_title = "Down",  column_names_gp = gpar(fontsize = 14, fontface="bold", col = colors[colnames(X.D)]), row_names_gp = gpar(fontsize = 14, fontface="bold"), column_title_gp = gpar(fontsize = 18, fontface="bold"), row_title_gp = gpar(fontsize = 18, fontface="bold"), row_names_max_width = unit(150, "cm"), column_names_max_height = unit(150, "cm"))
 dev.off()
 
 
 ```
+
+
 
 

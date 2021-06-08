@@ -19,42 +19,6 @@ figures.path = "~/results/figures"
 
 ```
 
-## Enrichment function
-```{r}
-assess.genesets <-function (arch.gs, terms.gs, N, min.pval = 1e-100, correct = "none"){
-    shared = t(sapply(terms.gs, function(gs1) {
-        sapply(arch.gs, function(gs2) {
-            nn = intersect(gs1, gs2)
-        })
-    }))
-    colnames(shared) = names(arch.gs)
-    GS.sizes = sapply(terms.gs, length)
-    logPvals.out = sapply(1:ncol(shared), function(i) {
-        gg = shared[, i]
-        x = as.numeric(sapply(gg, length))
-        n.sample = length(arch.gs[[i]])
-        n.success = as.numeric(GS.sizes)
-        v = rep(1, length(x))
-        min.overlap = n.success * n.sample/N
-        idx = which(x >= min.overlap)
-        if (length(idx) == 0) 
-            return(v)
-        v[idx] = (phyper(x[idx]-1, n.sample, N-n.sample, n.success[idx], lower.tail = F))
-        # v[idx] = HGT_tail(population.size = N, success.count = n.success[idx], 
-        #     sample.size = n.sample, observed.success = x[idx])
-        return(v)
-    })
-    if(correct == "global") {
-      logPvals.out = matrix(p.adjust(logPvals.out, "fdr"), nrow = nrow(logPvals.out))
-    } else if(correct == "local") {
-      logPvals.out = apply(logPvals.out, 2, function(x) p.adjust(x, "fdr"))
-    }
-    rownames(logPvals.out) = names(terms.gs)
-    colnames(logPvals.out) = names(arch.gs)
-    return(-log10(Matrix::t(logPvals.out)))
-}
-```
-
 # Load primary datasets
 ```{r, eval = T}
 ACTIONet_summary = readr::read_rds(file.path(dataset.path, "ACTIONet_summary_filtered_individuals.rds"))
@@ -80,51 +44,149 @@ DE.sc = DE.new$DE.sc
 
 ```
 
+# Load bulk expression
+```{r}
+bulk = readr::read_rds("~/results/input/MPP_bulk_expression_SZandCON.rds")
+bulk.profile = assays(bulk)$voom
+bulk.profile.orth = orthoProject(bulk.profile, Matrix::rowMeans(bulk.profile))
+
+```
 
 ```{r}
-assess.geneset.enrichment.from.archetypes <- function (ace, associations, min.counts = 0, specificity.slot = "unified_feature_specificity") 
-{
-    if(is.matrix(ace) | is.sparseMatrix(ace)) {
-      scores = as.matrix(ace)
-    } else {
-      scores = rowMaps(ace)[[specificity.slot]]
-    }
-    if (max(scores) > 100) {
-        scores = log1p(scores)
-    }
-    if (is.list(associations)) {
-        associations = sapply(associations, function(gs) as.numeric(rownames(scores) %in% 
-            gs))
-        rownames(associations) = rownames(scores)
-    }
-    common.features = intersect(rownames(associations), rownames(scores))
-    rows = match(common.features, rownames(associations))
-    associations = as(associations[rows, ], "dgCMatrix")
-    scores = scores[common.features, ]
-    enrichment.out = assess_enrichment(scores, associations)
-    rownames(enrichment.out$logPvals) = colnames(associations)
-    rownames(enrichment.out$thresholds) = colnames(associations)
-    enrichment.out$scores = scores
-    return(enrichment.out)
-}
+arch.annot = annotate.archetypes.using.labels(t(ACTIONet_summary$H_unified), ACTIONet_summary$metadata$Labels)
 
-annotate.archetypes.using.markers <- function (ace, markers, features_use = NULL, significance_slot = "unified_feature_specificity") 
-{
-    features_use = ACTIONet:::.preprocess_annotation_features(ace, features_use)
-    marker_mat = ACTIONet:::.preprocess_annotation_markers(markers, features_use)
-    marker_stats = Matrix::t(assess.geneset.enrichment.from.archetypes(ace, 
-        marker_mat, specificity.slot = significance_slot)$logPvals)
-    colnames(marker_stats) = colnames(marker_mat)
-    marker_stats[!is.finite(marker_stats)] = 0
-    annots = colnames(marker_mat)[apply(marker_stats, 1, which.max)]
-    conf = apply(marker_stats, 1, max)
-    out = list(Label = annots, Confidence = conf, Enrichment = marker_stats)
-    return(out)
-}
+arch.labels = paste("A", 1:ncol(ACTIONet_summary$H_unified), "-", arch.annot$Label, sep = "")
+arch.labels[c(7, 11, 17, 29)] = paste("A", c(7, 11, 17, 29), "-", c("Ex-NRGN", "Ex-SZ", "Ex-SZTR", "In-SZ"), sep = "")
+
+arch.order = c(setdiff(order(match(arch.annot$Label, names(colors))), c(11, 17, 29)), c(11, 17, 29))
+
+```
+
+```{r}
+celltype.spec = readRDS("~/results/datasets/celltype_gene_specificity.rds")
+
+common.genes = intersect(rownames(celltype.spec), rownames(bulk.profile.orth))
+
+cc.celltypes = cor(bulk.profile.orth[common.genes, ], celltype.spec[common.genes, ])
+rownames(cc.celltypes) = bulk$SampleID
+
+df = as.data.frame(cc.celltypes)
+df$Phenotype = bulk$Dx
+df$ID = bulk$SampleID
+saveRDS(df, file.path(dataset.path, "celltypes_vs_bulk_cor.rds"))
+
+
+
+
+sample.sets = split(bulk$SampleID, bulk$Dx)
+pvals.celltypes=apply(cc.celltypes, 2, function(x) {
+  gsea.out = fgsea(sample.sets, x, eps = 0)
+  return(gsea.out$pval)
+})
+# pvals.corrected = -log10(p.adjust(pvals, "fdr"))
+# Enrichment = t(matrix(pvals.corrected, nrow = 2))
+Enrichment = t(-log10(apply(pvals.celltypes, 2, function(p) p.adjust(p, "fdr"))))
+colnames(Enrichment) = names(sample.sets)
+Enrichment[Enrichment < -log10(0.05)] = 0
+
+Heatmap(Enrichment)
+
+```
+
+```{r}
+arch.spec = readRDS("~/results/datasets/archetype_gene_specificity.rds")
+
+
+common.genes = intersect(rownames(arch.spec), rownames(bulk.profile.orth))
+
+cc = cor(bulk.profile.orth[common.genes, ], arch.spec[common.genes, ])
+rownames(cc) = bulk$SampleID
+
+sample.sets = split(bulk$SampleID, bulk$Dx)
+pvals=apply(cc, 2, function(x) {
+  gsea.out = fgsea(sample.sets, x, eps = 0)
+  return(gsea.out$pval)
+})
+# pvals.corrected = -log10(p.adjust(pvals, "fdr"))
+# Enrichment = t(matrix(pvals.corrected, nrow = 2))
+Enrichment = t(-log10(apply(pvals, 2, function(p) p.adjust(p, "fdr"))))
+rownames(Enrichment) = arch.labels
+colnames(Enrichment) = names(sample.sets)
+Enrichment[Enrichment < -log10(0.05)] = 0
+
+df = as.data.frame(cc[, arch.order])
+colnames(df) = arch.labels[arch.order]
+df$Phenotype = bulk$Dx
+df$ID = bulk$SampleID
+saveRDS(df, file.path(dataset.path, "cellstates_vs_bulk_cor.rds"))
+
+
+# PurPal = colorRampPalette(RColorBrewer::brewer.pal(11, "Purples"))(200)
+
+pdf(file.path(figures.path, "Archs_vs_bulk_fgsea_states.pdf"), width = 3.5, height = 2)
+Heatmap(Enrichment[arch.order[c(1, 29:31)], ], cluster_rows = F, cluster_columns = F, rect_gp = gpar(col = "black"), row_names_side = "left", row_names_gp = gpar(col = colors[arch.annot$Label[arch.order]]), name = "Enrichment", col = PurPal)
+dev.off()
+
+
 ```
 
 
+```{r}
+require(openxlsx)
 
+PEC_modules = readLines(con <- file("~/PEC_modules/INT-09_WGCNA_modules_hgnc_ids.csv"))
+
+
+mod.names = lapply(PEC_modules, function(x) str_split(x, "\t")[[1]][1])
+PEC_modules.genes = lapply(PEC_modules, function(x) sort(unique(str_split(x, "\t")[[1]][-1])))
+names(PEC_modules.genes) = mod.names
+
+SZ.mods = c("module_3628", "module_3636", "module_3711", "module_3251", "module_1749", "module_2752", "module_3001", "module_3009", "module_3172", "module_3332", "module_3333", "module_3464", "module_3614", "module_725", "module_738", "module_1685", "module_1755", "module_2692", "module_3107", "module_3184", "module_3316", "module_3349", "module_3381", "module_3496", "module_3543", "module_3616", "module_3673", "module_3678", "module_3693", "module_3709", "module_3731")
+PEC_modules.genes.SZ = PEC_modules.genes[SZ.mods]
+
+
+arch.spec = ACTIONet_summary$unified_feature_specificity
+associations = do.call(cbind, lapply(PEC_modules.genes, function(mod) as.numeric(rownames(arch.spec) %in% mod)))
+colnames(associations) = mod.names
+rownames(associations) = rownames(arch.spec)
+PEC.mod.en = assess.geneset.enrichment.from.scores(arch.spec, associations)
+PEC.mod.logPvals = PEC.mod.en$logPvals
+colnames(PEC.mod.logPvals) = colnames(arch.spec)
+rownames(PEC.mod.logPvals) = mod.names
+  
+# plot.top.k.features(PEC.mod.logPvals)
+
+
+
+pdf(file.path(figures.path, "Archs_vs_PEC_SZ_modules_cellstates.pdf"), width = 10, height = 2)
+Heatmap(X[29:31, ], cluster_rows = F, cluster_columns = F, rect_gp = gpar(col = "black"), row_names_side = "left", row_names_gp = gpar(col = colors[arch.annot$Label[arch.order[29:31]]]), name = "Enrichment", col = blues9)
+dev.off()
+
+
+```
+```{r}
+Mod.vs.DE.up = assess.genesets(Up.genes, PEC_modules.genes[SZ.mods], nrow(pb.logcounts), correct = "local")
+Mod.vs.DE.down = assess.genesets(Down.genes, PEC_modules.genes[SZ.mods], nrow(pb.logcounts), correct = "local")
+
+
+# Mod.vs.DE.up[Mod.vs.DE.up < -log10(0.05)] = 0
+# Y = Mod.vs.DE.up
+# Rd.pal = circlize::colorRamp2(seq(0, quantile(Y, 0.99), length.out = 8), c("#ffffff", pals::brewer.reds(7)))
+
+Mod.vs.DE.down[Mod.vs.DE.down < -log10(0.05)] = 0
+X = Mod.vs.DE.down
+Bu.pal = circlize::colorRamp2(seq(0, quantile(X, 0.99), length.out = 8), c("#ffffff", pals::brewer.blues(7)))
+
+
+
+pdf(file.path(figures.path, "DE_Down_vs_PEC_SZ_modules.pdf"), width = 9)
+Heatmap(X, cluster_rows = F, rect_gp = gpar(col = "black"), name = "Down", row_names_side = "left", row_names_gp = gpar(col = colors), col = Bu.pal)
+dev.off()
+
+
+
+
+```
 
 
 

@@ -103,6 +103,16 @@ assigned.genes2celltype.df$dir[assigned.genes2celltype.df$score < 0] = "Down"
 ```
 
 
+```{r}
+(CAMTA1, BCL11B) and 8 are not nominally sig dif (CUL3, TRANK1, NRBP2, SNX19, ABHD2, ZNF146, SLC25A17, CACNA1C)
+
+
+
+df = assigned.genes2celltype.df[c("CAMTA1", "BCL11B", "CUL3", "TRANK1", "NRBP2", "SNX19", "ABHD2", "ZNF146", "SLC25A17", "CACNA1C"), ]
+
+```
+
+
 ## Load significant variants and mapped genes
 ```{r}
 PGC3.finemapped.genes.tbl = read.table(file.path(input.path, "Prioritised_PGC3_SZ_Genes.csv"), sep = "\t", header = T)

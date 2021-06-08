@@ -241,7 +241,9 @@ readr::write_rds(combined.analysis.tables, file.path(dataset.path, "meta_analysi
     res = combined.analysis.tables[[i]]
     res = res[(res$logFC > logFC_threshold) & (res$P.Value <= pval_threshold), ]
     res = res[order(res$t, decreasing = T), ]
-  
+    res$isSig = res$adj.P.Val <= pval_threshold
+    
+    
     n = names(combined.analysis.tables)[[i]] 
     
     addWorksheet(wb=Up.wb, sheetName = n)
@@ -256,6 +258,7 @@ readr::write_rds(combined.analysis.tables, file.path(dataset.path, "meta_analysi
     res = combined.analysis.tables[[i]]
     res = res[(res$logFC < -logFC_threshold) & (res$P.Value <= pval_threshold), ]
     res = res[order(res$t, decreasing = F), ]
+    res$isSig = res$adj.P.Val <= pval_threshold
     
     n = names(combined.analysis.tables)[[i]] 
     

@@ -71,7 +71,6 @@ names(colors) = color.df$celltype
 
 # Load DE results
 ```{r, eval = T}
-resDE = readr::read_rds(file.path(dataset.path, "Cohort_specific_DE_results.rds"))
 filtered.tables = readr::read_rds(file.path(dataset.path, "Cohort_specific_DE_results_filtered.rds"))
 combined.analysis.tables = readr::read_rds(file.path(dataset.path, "meta_analysis_results.rds"))
 
@@ -79,7 +78,6 @@ DE.new = readRDS(file.path(dataset.path, "DE_genes_pseudobulk.rds"))
 Up.genes = DE.new$Up.genes
 Down.genes = DE.new$Down.genes
 DE.sc = DE.new$DE.sc
-ordered.celltypes = rownames(X)[order(apply(X, 1, sum), decreasing = T)]
 
 ```
 
@@ -136,7 +134,7 @@ names(ChEA3.Up) = names(ChEA3.Down) = names(Up.genes)
 
 ## Load significant variants and mapped genes
 ```{r}
-PGC3.loci = read.table(file.path(input.folder, "PGC3_SZ_significant_loci.csv"), sep = "\t", header = T)
+PGC3.loci = read.table(file.path(input.path, "PGC3_SZ_significant_loci.csv"), sep = "\t", header = T)
 
 associated.genes = PGC3.loci$ENSEMBL.genes..all..clear.names.
 
@@ -463,6 +461,8 @@ dev.off()
 
 
 ```
+
+
 ```{r}
 # merge = mergeCloseModules(multiExpr, unmergedLabels, cutHeight = 0.25, verbose = 3)
 # 
@@ -494,7 +494,9 @@ ff = factor(unmergedColors)
 TF.mods = split(subTFs, ff)
 perm = order(sapply(TF.mods, function(gs) mean(TF.mean.scores[gs])), decreasing = T)
 sorted.TFmods = levels(ff)[perm]
-
+TF.mods = TF.mods[sorted.TFmods]
+TF.mods = TF.mods[-which(sorted.TFmods == "grey")]
+TF.mods = lapply(TF.mods, function(gs) gs[order(TF.mean.scores[gs], decreasing = T)])
 
 
 TF.df = data.frame(TFs = subTFs, modules = unmergedLabels, colors = factor(unmergedColors, rev(sorted.TFmods)), GWAS.linked.PGC3 = as.numeric(subTFs %in% PGC3.all.genes), ChEA.aggregate.association = TF.mean.scores[subTFs])
@@ -511,42 +513,28 @@ write.table(TF.df, file.path(tables.path, "TF_modules_WGCNA.tsv"), sep = "\t", r
 ```
 
 
-
 ```{r}
-TF.mods = rev(split(TF.df$TFs, TF.df$colors))
-
-TF.mods.ChEA.up = (sapply(TF.mods, function(TFs) {
-  mean(TF.up[TFs,])
-}))
-
-TF.mods.ChEA.down = (sapply(TF.mods, function(TFs) {
-  mean(TF.down[TFs,])
-}))
-
-gg = lapply(c(SZ.genes, list(PGC3 = PGC3.all.genes)), function(gs) intersect(gs, subTFs))
-FunCat.TFs = lapply(FunCat.genes, function(gs) intersect(gs, subTFs))
-
-TFmod.enrichment = assess.genesets(TF.mods, gg , length(subTFs), correct = "local")
-TFmod.enrichment.funcat = assess.genesets(TF.mods, FunCat.TFs , length(subTFs), correct = "local")
-
-Heatmap(TFmod.enrichment.funcat)
-
-
-# TF.mods.ChEA.up.per.celltype = do.call(rbind, lapply(TF.mods, function(TFs) {
-#   apply(TF.up[TFs, ], 2, mean)
-# }))
-# 
-# TF.mods.ChEA.down.per.celltype = do.call(rbind, lapply(TF.mods, function(TFs) {
-#   apply(TF.down[TFs,], 2, mean)
-# }))
-
-
+TF.df = read.table(file.path(tables.path, "TF_modules_WGCNA.tsv"), sep = "\t", header = T)
 
 ```
 
 
 ```{r}
-Heatmap(TF.mods.ChEA.down.per.celltype, cluster_rows = F, cluster_columns = F)
+TF.mods = split(TF.df$TFs, factor(TF.df$colors, unique(TF.df$colors)))
+
+df.up = reshape2::melt(cbind(TF.df[, c(1, 3)], data.frame(TF.up[TF.df$TFs, ])))
+df.down = reshape2::melt(cbind(TF.df[, c(1, 3)], data.frame(TF.down[TF.df$TFs, ])))
+df.down$value = df.down$value
+df.up$Direction = "Up"
+df.down$Direction = "Down"
+df.combined = rbind(df.up, df.down)
+df.combined$colors = factor(df.combined$colors, unique(TF.df$colors))
+  
+pdf(file.path(figures.path, "ChEA_aggr_scores_per_module_barplot.pdf"), height = 4)
+ggbarplot(df.combined, "colors", "value", fill = "Direction", palette = c("#3288bd", "#d53e4f"), add = "mean_se") + ylab("ChEA Score (combined)") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color = unique(TF.df$colors))) + xlab("TF Modules (sorted)")
+dev.off()
+
+
 
 ```
 
@@ -557,8 +545,8 @@ sorted.TFs = unlist(TF.mods)
 ChEA.up.per.TF = as.matrix(apply(TF.up[sorted.TFs, ], 1, mean))
 ChEA.down.per.TF = as.matrix(apply(TF.up[sorted.TFs, ], 1, mean))
 
-Heatmap(ChEA.down.per.TF, cluster_rows = F)
-  
+# Heatmap(ChEA.down.per.TF, cluster_rows = F)
+#   
 
 ww = consensusTOM[sorted.TFs, sorted.TFs]
 diag(ww) = NA
@@ -576,207 +564,45 @@ colnames(X) = colnames(Y) = c()
 
 Pal = as.character(pals::brewer.ylorrd(11))
 
-# pdf(file.path(figures.path, "TF_modules_unlabeled.pdf"), width = 8, height = 6)
-Heatmap(ww, row_names_side = "left", name = "ConsensusTOM", col = Pal, column_title = "TF-TF expression correlation", column_title_gp = gpar(fontsize = 21), cluster_rows = F, cluster_columns = F, left_annotation = ha_row) + Heatmap(X, cluster_columns = F, col = c("#ffffff", pals::brewer.reds(9)), column_title = "Up", column_title_gp = gpar(fontsize = 21), name = "Up", cluster_rows = F) + Heatmap(Y, cluster_columns = F, col = c("#ffffff", pals::brewer.blues(9)), column_title = "Down", column_title_gp = gpar(fontsize = 21), name = "Down", row_names_side = "left", cluster_rows = F)
-# dev.off()
-
-```
-
-
-
-```{r}
-sorted.TFs = unlist(TF.mods)
-ww = consensusTOM[sorted.TFs, sorted.TFs]
-diag(ww) = NA
-
-MPal = names(TF.mods)
-names(MPal) = MPal
-ha_row = rowAnnotation(Module = factor(unlist(lapply(1:length(TF.mods), function(i) rep(names(TF.mods)[[i]], length(TF.mods[[i]])))), names(TF.mods)), col = list(Module = MPal))
-
-ha_row = rowAnnotation(Module = factor(unlist(lapply(1:length(TF.mods), function(i) rep(names(TF.mods)[[i]], length(TF.mods[[i]])))), names(TF.mods)), col = list(Module = MPal))
-
-X = TF.mods.ChEA.up.per.celltype
-Y = TF.mods.ChEA.down.per.celltype
-# colnames(X) = colnames(Y) = c()
-
-Pal = as.character(pals::brewer.ylorrd(11))
-
-pdf(file.path(figures.path, "TF_modules_unlabeled.pdf"), width = 8, height = 6)
-Heatmap(ww, row_names_side = "left", name = "ConsensusTOM", col = Pal, column_title = "TF-TF expression correlation", column_title_gp = gpar(fontsize = 21), cluster_rows = F, cluster_columns = F, left_annotation = ha_row) + Heatmap(X, cluster_columns = F, col = c("#ffffff", pals::brewer.reds(9)), column_title = "Up", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.up)]), name = "Up", top_annotation = ha_row_ct) + Heatmap(Y, cluster_columns = F, col = c("#ffffff", pals::brewer.blues(9)), column_title = "Down", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.down)]), name = "Down", row_names_side = "left", top_annotation = ha_row_ct)
+pdf(file.path(figures.path, "TF_modules_unlabeled_colored.pdf"), width = 7, height = 7)
+Heatmap(ww, row_names_side = "left", name = "ConsensusTOM", col = Pal, column_title = "TF-TF expression correlation", column_title_gp = gpar(fontsize = 21), cluster_rows = F, cluster_columns = F, left_annotation = ha_row)
 dev.off()
+
+
+pdf(file.path(figures.path, "TF_modules_unlabeled_uncolored.pdf"), width = 5.5, height = 5)
+Heatmap(ww, row_names_side = "left", name = "ConsensusTOM", col = Pal, column_title = "TF-TF expression correlation", column_title_gp = gpar(fontsize = 12), cluster_rows = F, cluster_columns = F)
+dev.off()
+
+
 ```
 
-
-
 ```{r}
-sorted.TFs = unlist(TF.mods)
-mask = sorted.TFs %in% PGC3.all.genes
+purpleMod = TF.mods[[1]]
+mask = purpleMod %in% PGC3.all.genes
 TF.colors = rep("black", length(sorted.TFs))
 TF.colors[mask] = "red"
 
-Pal = as.character(pals::brewer.ylorrd(11))
 
-ww = consensusTOM[sorted.TFs, sorted.TFs]
-diag(ww) = NA
+X.U = TF.up[purpleMod,]
+redCol_fun = circlize::colorRamp2(c(0, exp(quantile(log(X.U), seq(0.25, 0.95, length.out = 12)))), c("#ffffff", pals::brewer.reds(12)))
 
-MPal = names(TF.mods)
-names(MPal) = MPal
-ha_row = rowAnnotation(Module = factor(unlist(lapply(1:length(TF.mods), function(i) rep(names(TF.mods)[[i]], length(TF.mods[[i]])))), names(TF.mods)), col = list(Module = MPal))
+X.D = TF.down[purpleMod,]
+blueCol_fun = circlize::colorRamp2(c(0, exp(quantile(log(X.D), seq(0.25, 0.95, length.out = 12)))), c("#ffffff", pals::brewer.blues(12)))
 
-ha_row = rowAnnotation(Module = factor(unlist(lapply(1:length(TF.mods), function(i) rep(names(TF.mods)[[i]], length(TF.mods[[i]])))), names(TF.mods)), col = list(Module = MPal))
-# 
-# pdf(file.path(figures.path, "TF_modules.pdf"), width = 82, height = 82)
-# Heatmap(ww, row_names_side = "left", name = "ConsensusTOM", col = Pal, row_names_gp = gpar(col = TF.colors), column_title = "TF-TF expression correlation", column_title_gp = gpar(fontsize = 21), cluster_rows = F, cluster_columns = F, left_annotation = ha_row) + Heatmap(TF.up[sorted.TFs, 1:17], rect_gp = gpar(col = "black"), cluster_columns = F, col = c("#ffffff", pals::brewer.reds(9)), column_title = "Up", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.up)]), name = "Up") + Heatmap(TF.down[sorted.TFs, 1:17], rect_gp = gpar(col = "black"), cluster_columns = F, col = c("#ffffff", pals::brewer.blues(9)), column_title = "Down", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.down)]), name = "Down", row_names_side = "left")
-# dev.off()
+# row.names(X.U) = rownames(X.D) = annots
+# CC = (cor(t(X.U)) + cor(t(X.D))) / 2
+# CC[is.na(CC)] = 0
+# perm = get_order(seriate)
 
-
-ha_row_ct = columnAnnotation(Celltype = names(DE.new$Up.genes[1:17]), col = list(Celltype = colors[names(DE.new$Up.genes)[1:17]]))
-
-# rownames(ww) = colnames(ww) = c()
-X = TF.mods.ChEA.up.per.celltype
-Y = TF.mods.ChEA.down.per.celltype
-# colnames(X) = colnames(Y) = c()
-
-pdf(file.path(figures.path, "TF_modules_unlabeled.pdf"), width = 8, height = 6)
-Heatmap(ww, row_names_side = "left", name = "ConsensusTOM", col = Pal, column_title = "TF-TF expression correlation", column_title_gp = gpar(fontsize = 21), cluster_rows = F, cluster_columns = F, left_annotation = ha_row) + Heatmap(X, cluster_columns = F, col = c("#ffffff", pals::brewer.reds(9)), column_title = "Up", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.up)]), name = "Up", top_annotation = ha_row_ct) + Heatmap(Y, cluster_columns = F, col = c("#ffffff", pals::brewer.blues(9)), column_title = "Down", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.down)]), name = "Down", row_names_side = "left", top_annotation = ha_row_ct)
+pdf(file.path(figures.path, "TF_module_purple_ChEA_scores.pdf"), width = 8, height = 8)
+Heatmap(X.U, rect_gp = gpar(col = "black"), name = "Up", column_title = "Up", cluster_rows = F, cluster_columns = F, col = redCol_fun, row_names_side = "left",  column_names_gp = gpar(fontsize = 14, fontface="bold", col = colors[colnames(X.U)]), row_names_gp = gpar(fontsize = 14, fontface="bold", col = TF.colors), column_title_gp = gpar(fontsize = 18, fontface="bold"), row_title_gp = gpar(fontsize = 18, fontface="bold"), row_names_max_width = unit(150, "cm"), column_names_max_height = unit(150, "cm"))+
+Heatmap(X.D, rect_gp = gpar(col = "black"), name = "Down", cluster_rows = F, cluster_columns = F, col = blueCol_fun, row_names_side = "left", column_title = "Down",  column_names_gp = gpar(fontsize = 14, fontface="bold", col = colors[colnames(X.D)]), row_names_gp = gpar(fontsize = 14, fontface="bold"), column_title_gp = gpar(fontsize = 18, fontface="bold"), row_title_gp = gpar(fontsize = 18, fontface="bold"), row_names_max_width = unit(150, "cm"), column_names_max_height = unit(150, "cm"))
 dev.off()
-
 
 ```
 
 
-```{r}
-TF.mods = split(rownames(adj), unmergedColors)
-# TF.mods = lapply(TF.mods, function(gs) gs[order(TF.mean.scores[gs], decreasing = T)])
-TF.mods = lapply(TF.mods, function(gs) {
-  CC = cor(consensusTOM[, gs])
-  w = fast_column_sums(CC)
-  perm = order(w, decreasing = T)
-  # perm = get_order(seriate(as.dist(1-cor(consensusTOM[, gs])), "OLO_single"))
-  gs[perm]
-})
 
-TF.mods = TF.mods[-which(names(TF.mods) == "grey")]
-
-perm = order(sapply(TF.mods, function(gs) mean(TF.mean.scores[gs])), decreasing = T)
-TF.mods = TF.mods[perm]
-
-
-
-
-# data("gProfilerDB_human")
-# BP = gProfilerDB_human$SYMBOL$`GO:BP`
-# cs = fast_column_sums(BP)
-# BP = BP[, (cs >= 10) & (cs <= 1000)]
-# BP.gs = apply(BP, 2, function(x) rownames(BP)[x > 0])
-
-# FunCat.TFs = lapply(FunCat.genes, function(gs) intersect(TFs, gs))
-# TF.enrichment = assess.genesets(FunCat.TFs, TF.mods, length(TFs), "local")
-# TF.enrichment = TF.enrichment[, fast_column_sums(TF.enrichment) > 1]
-# # Heatmap((TF.enrichment))
-# 
-# Heatmap(doubleNorm(TF.enrichment))
-
-
-
-
-
-# sorted.TFs = unlist(lapply(TF.mods, function(x) x[order(TF.mean.scores[x], decreasing = T]))
-
-
-# sorted.TFs = unlist(lapply(TF.mods[1:5], function(x) x[order(TF.mean.scores[x], decreasing = T)]))
-# 
-# mask = sorted.TFs %in% PGC3.all.genes
-# TF.colors = rep("black", length(sorted.TFs))
-# TF.colors[mask] = "red"
-# 
-# ww = CC.mean[sorted.TFs, sorted.TFs]
-# diag(ww) = NA
-# MPal = pals::brewer.dark2(5)
-# names(MPal) = paste("M", 1:5, sep = "")
-# ha_row = rowAnnotation(Module = factor(unlist(lapply(1:5, function(i) paste("M", rep(i, length(TF.mods[[i]])), sep = ""))), paste("M", 1:5, sep = "")), col = list(Module = MPal))
-# pdf(file.path(figures.path, "TF_modules_top5_tmp.pdf"), width = 18, height = 12)
-# Heatmap(ww, row_names_side = "left", name = "Correlation", row_names_gp = gpar(col = TF.colors), column_title = "TF-TF expression correlation", column_title_gp = gpar(fontsize = 21), cluster_rows = F, cluster_columns = F, left_annotation = ha_row) + Heatmap(TF.up[sorted.TFs, ], rect_gp = gpar(col = "black"), cluster_columns = F, column_title = "Up", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.up)]), name = "Up") + Heatmap(TF.down[sorted.TFs, ], rect_gp = gpar(col = "black"), cluster_columns = F, column_title = "Down", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.down)]), name = "Down", row_names_side = "left")
-# dev.off()
-
-
-# sorted.TFs = unlist(lapply(TF.mods, function(x) x[order(TF.mean.scores[x], decreasing = T)]))
-
-# sorted.TFs = get_order(seriate(as.dist(1-adj), "OLO"))
-
-
-sorted.TFs = unlist(TF.mods)
-mask = sorted.TFs %in% PGC3.all.genes
-TF.colors = rep("black", length(sorted.TFs))
-TF.colors[mask] = "red"
-
-Pal = as.character(pals::brewer.ylorrd(11))
-
-ww = consensusTOM[sorted.TFs, sorted.TFs]
-diag(ww) = NA
-
-MPal = names(TF.mods)
-names(MPal) = MPal
-ha_row = rowAnnotation(Module = factor(unlist(lapply(1:length(TF.mods), function(i) rep(names(TF.mods)[[i]], length(TF.mods[[i]])))), names(TF.mods)), col = list(Module = MPal))
-
-ha_row = rowAnnotation(Module = factor(unlist(lapply(1:length(TF.mods), function(i) rep(names(TF.mods)[[i]], length(TF.mods[[i]])))), names(TF.mods)), col = list(Module = MPal))
-
-pdf(file.path(figures.path, "TF_modules.pdf"), width = 82, height = 82)
-Heatmap(ww, row_names_side = "left", name = "ConsensusTOM", col = Pal, row_names_gp = gpar(col = TF.colors), column_title = "TF-TF expression correlation", column_title_gp = gpar(fontsize = 21), cluster_rows = F, cluster_columns = F, left_annotation = ha_row) + Heatmap(TF.up[sorted.TFs, 1:17], rect_gp = gpar(col = "black"), cluster_columns = F, col = c("#ffffff", pals::brewer.reds(9)), column_title = "Up", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.up)]), name = "Up") + Heatmap(TF.down[sorted.TFs, 1:17], rect_gp = gpar(col = "black"), cluster_columns = F, col = c("#ffffff", pals::brewer.blues(9)), column_title = "Down", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.down)]), name = "Down", row_names_side = "left")
-dev.off()
-
-
-ha_row_ct = columnAnnotation(Celltype = names(DE.new$Up.genes[1:17]), col = list(Celltype = colors[names(DE.new$Up.genes)[1:17]]))
-
-rownames(ww) = colnames(ww) = c()
-X = exp(scale(TF.up[sorted.TFs, 1:17])/1.65)
-Y = exp(scale(TF.down[sorted.TFs, 1:17])/1.65)
-colnames(X) = colnames(Y) = c()
-
-pdf(file.path(figures.path, "TF_modules_unlabeled.pdf"), width = 8, height = 6)
-Heatmap(ww, row_names_side = "left", name = "ConsensusTOM", col = Pal, column_title = "TF-TF expression correlation", column_title_gp = gpar(fontsize = 21), cluster_rows = F, cluster_columns = F, left_annotation = ha_row) + Heatmap(X, cluster_columns = F, col = c("#ffffff", pals::brewer.reds(9)), column_title = "Up", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.up)]), name = "Up", top_annotation = ha_row_ct) + Heatmap(Y, cluster_columns = F, col = c("#ffffff", pals::brewer.blues(9)), column_title = "Down", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.down)]), name = "Down", row_names_side = "left", top_annotation = ha_row_ct)
-dev.off()
-
-
-
-```
-
-# Top 5 modules
-```{r}
-sorted.TFs = unlist(TF.mods[1:5])
-mask = sorted.TFs %in% PGC3.all.genes
-TF.colors = rep("black", length(sorted.TFs))
-TF.colors[mask] = "red"
-
-Pal = as.character(pals::brewer.ylorrd(11))
-
-
-
-ww = consensusTOM[sorted.TFs, sorted.TFs]
-diag(ww) = NA
-
-MPal = names(TF.mods[1:5])
-names(MPal) = MPal
-ha_row = rowAnnotation(Module = factor(unlist(lapply(1:length(TF.mods[1:5]), function(i) rep(names(TF.mods)[[i]], length(TF.mods[[i]])))), names(TF.mods)), col = list(Module = MPal))
-
-
-pdf(file.path(figures.path, "TF_modules_top5.pdf"), width = 32, height = 32)
-Heatmap(ww, row_names_side = "left", name = "ConsensusTOM", col = Pal, row_names_gp = gpar(col = TF.colors), column_title = "TF-TF expression correlation", column_title_gp = gpar(fontsize = 21), cluster_rows = F, cluster_columns = F, left_annotation = ha_row) + Heatmap(TF.up[sorted.TFs, 1:17], rect_gp = gpar(col = "black"), cluster_columns = F, col = c("#ffffff", pals::brewer.reds(9)), column_title = "Up", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.up)]), name = "Up") + Heatmap(TF.down[sorted.TFs, 1:17], rect_gp = gpar(col = "black"), cluster_columns = F, col = c("#ffffff", pals::brewer.blues(9)), column_title = "Down", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.down)]), name = "Down", row_names_side = "left")
-dev.off()
-
-# 
-# ha_row_ct = columnAnnotation(Celltype = names(DE.new$Up.genes[1:17]), col = list(Celltype = colors[names(DE.new$Up.genes)[1:17]]))
-# 
-# rownames(ww) = colnames(ww) = c()
-# X = exp(scale(TF.up[sorted.TFs, 1:17])/1.65)
-# Y = exp(scale(TF.down[sorted.TFs, 1:17])/1.65)
-# colnames(X) = colnames(Y) = c()
-# 
-# pdf(file.path(figures.path, "TF_modules_unlabeled.pdf"), width = 8, height = 6)
-# Heatmap(ww, row_names_side = "left", name = "ConsensusTOM", col = Pal, column_title = "TF-TF expression correlation", column_title_gp = gpar(fontsize = 21), cluster_rows = F, cluster_columns = F, left_annotation = ha_row) + Heatmap(X, cluster_columns = F, col = c("#ffffff", pals::brewer.reds(9)), column_title = "Up", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.up)]), name = "Up", top_annotation = ha_row_ct) + Heatmap(Y, cluster_columns = F, col = c("#ffffff", pals::brewer.blues(9)), column_title = "Down", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.down)]), name = "Down", row_names_side = "left", top_annotation = ha_row_ct)
-# dev.off()
-
-```
 
 
 # Overlap with ME37
@@ -813,6 +639,67 @@ require(eulerr)
 pdf(file.path(figures.path, "Supp", "SATB2_vs_ME37_Venn.pdf"))
 plot(euler(S), quantities = T)
 dev.off()
+
+```
+
+## Analyze TGs with CUTTag
+```{r}
+CUTTag = readr::read_rds("~/CUTTag_linked_GRs_reproducible_linked_genes.rds")
+CUTTag = CUTTag[-2]
+
+CUTTAG.vs.DE.up = assess.genesets(Up.genes, CUTTag, nrow(pb.logcounts), correct = "local")
+CUTTAG.vs.DE.down = assess.genesets(Down.genes, CUTTag, nrow(pb.logcounts), correct = "local")
+
+
+X.U = (CUTTAG.vs.DE.up)
+X.D = (CUTTAG.vs.DE.down)
+colnames(X.U) = colnames(X.D) = names(CUTTag)
+X.U = X.U[, -3]
+X.D = X.D[, -3]
+
+redCol_fun = circlize::colorRamp2(c(0, exp(quantile(log(X.U)[X.U > -log10(0.05)], seq(0.05, 0.99, length.out = 12)))), c("#ffffff", pals::brewer.reds(12)))
+
+blueCol_fun = circlize::colorRamp2(c(0, exp(quantile(log(X.D)[X.D > -log10(0.05)], seq(0.05, 0.99, length.out = 12)))), c("#ffffff", pals::brewer.blues(12)))
+
+
+pdf(file.path(figures.path, "CUTTag_vs_DE_genes.pdf"), width = 4, height = 6)
+par(mar=c(0,150,0,0))
+Heatmap(X.U, rect_gp = gpar(col = "black"), name = "Up", column_title = "Up", cluster_rows = F, cluster_columns = F, col = redCol_fun, row_names_side = "left",  column_names_gp = gpar(fontsize = 14, fontface="bold"), row_names_gp = gpar(fontsize = 14, fontface="bold", col = colors), column_title_gp = gpar(fontsize = 12, fontface="bold"), row_title_gp = gpar(fontsize = 12, fontface="bold"), row_names_max_width = unit(150, "cm"), column_names_max_height = unit(150, "cm"))+
+Heatmap(X.D, rect_gp = gpar(col = "black"), name = "Down", cluster_rows = F, cluster_columns = F, col = blueCol_fun, row_names_side = "left", column_title = "Down",  column_names_gp = gpar(fontsize = 14, fontface="bold"), row_names_gp = gpar(fontsize = 14, fontface="bold"), column_title_gp = gpar(fontsize = 12, fontface="bold"), row_title_gp = gpar(fontsize = 12, fontface="bold"), row_names_max_width = unit(150, "cm"), column_names_max_height = unit(150, "cm"))
+dev.off()
+
+
+```
+
+```{r}
+TGs = do.call(rbind, lapply(1:length(ChEA.analysis), function(i) {
+  print(i)
+  DF = ChEA.analysis[[i]]$`Integrated--topRank`
+  if(is.null(DF))
+    df = data.frame(TFs = c("SATB2", "MEF2C", "TCF4", "SOX5"), genes = rep("", ))
+  else
+    df = data.frame(TFs = c("SATB2", "MEF2C", "TCF4", "SOX5"), genes = DF$Overlapping_Genes[match(c("SATB2", "MEF2C", "TCF4", "SOX5"), DF$TF)])
+  df$Id = paste(df$TFs, names(ChEA.analysis)[[i]], sep = "_")
+  # df$enrichment=TF.pvals.enrichment[[i]]
+  
+  return(df)
+}))
+
+all.DE = sort(unique(union(unlist(DE.new$Up.genes), unlist(DE.new$Down.genes))))
+
+CUTTag.DE = lapply(CUTTag, function(x) intersect(x, all.DE))
+
+TGs.gs = as.list(TGs$genes)
+names(TGs.gs) = TGs$Id
+TG.enrichment = assess.genesets(TGs.gs, CUTTag.DE, length(all.DE), correct = F)
+
+# pdf("~/PFC_v3/figures/CUTTag_enrichment.pdf", height = 21)
+# Heatmap(TG.enrichment, rect_gp = gpar(col = "black"))
+# dev.off()
+
+
+
+
 
 ```
 

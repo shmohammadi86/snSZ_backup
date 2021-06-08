@@ -1,0 +1,616 @@
+---
+title: "Annotate and verify cell type annotations"
+output: html_notebook
+---
+# Setup
+```{r include=FALSE}
+require(ACTIONet)
+require(stringr)
+require(ComplexHeatmap)
+
+
+dataset.path = "~/results/datasets/"
+results.path = "~/results"
+figures.path = "~/results/figures"
+input.path = "~/results/input"
+
+
+```
+
+
+## Enrichment function
+```{r}
+assess.genesets <-function (arch.gs, terms.gs, N, min.pval = 1e-100, correct = "none"){
+    shared = t(sapply(terms.gs, function(gs1) {
+        sapply(arch.gs, function(gs2) {
+            nn = intersect(gs1, gs2)
+        })
+    }))
+    colnames(shared) = names(arch.gs)
+    GS.sizes = sapply(terms.gs, length)
+    logPvals.out = sapply(1:ncol(shared), function(i) {
+        gg = shared[, i]
+        x = as.numeric(sapply(gg, length))
+        n.sample = length(arch.gs[[i]])
+        n.success = as.numeric(GS.sizes)
+        v = rep(1, length(x))
+        min.overlap = n.success * n.sample/N
+        idx = which(x >= min.overlap)
+        if (length(idx) == 0) 
+            return(v)
+        v[idx] = (phyper(x[idx]-1, n.sample, N-n.sample, n.success[idx], lower.tail = F))
+        # v[idx] = HGT_tail(population.size = N, success.count = n.success[idx], 
+        #     sample.size = n.sample, observed.success = x[idx])
+        return(v)
+    })
+    if(correct == "global") {
+      logPvals.out = matrix(p.adjust(logPvals.out, "fdr"), nrow = nrow(logPvals.out))
+    } else if(correct == "local") {
+      logPvals.out = apply(logPvals.out, 2, function(x) p.adjust(x, "fdr"))
+    }
+    rownames(logPvals.out) = names(terms.gs)
+    colnames(logPvals.out) = names(arch.gs)
+    return(-log10(Matrix::t(logPvals.out)))
+}
+
+
+assess.geneset.enrichment.from.archetypes <- function (ace, associations, min.counts = 0, specificity.slot = "unified_feature_specificity") 
+{
+    if(is.matrix(ace) | is.sparseMatrix(ace)) {
+      scores = as.matrix(ace)
+    } else {
+      scores = rowMaps(ace)[[specificity.slot]]  
+    }
+    if (max(scores) > 100) {
+        scores = log1p(scores)
+    }
+    if (is.list(associations)) {
+        associations = sapply(associations, function(gs) as.numeric(rownames(scores) %in% 
+            gs))
+        rownames(associations) = rownames(scores)
+    }
+    common.features = intersect(rownames(associations), rownames(scores))
+    rows = match(common.features, rownames(associations))
+    associations = as(associations[rows, ], "dgCMatrix")
+    scores = scores[common.features, ]
+    enrichment.out = assess_enrichment(scores, associations)
+    rownames(enrichment.out$logPvals) = colnames(associations)
+    rownames(enrichment.out$thresholds) = colnames(associations)
+    enrichment.out$scores = scores
+    return(enrichment.out)
+}
+
+annotate_H_with_markers <- function (ace, markers, features_use = NULL, significance_slot = "unified_feature_specificity") 
+{
+    features_use = ACTIONet:::.preprocess_annotation_features(ace, features_use)
+    marker_mat = ACTIONet:::.preprocess_annotation_markers(markers, features_use)
+    marker_stats = Matrix::t(assess.geneset.enrichment.from.archetypes(ace, 
+        marker_mat)$logPvals)
+    colnames(marker_stats) = colnames(marker_mat)
+    marker_stats[!is.finite(marker_stats)] = 0
+    annots = colnames(marker_mat)[apply(marker_stats, 1, which.max)]
+    conf = apply(marker_stats, 1, max)
+    out = list(Label = annots, Confidence = conf, Enrichment = marker_stats)
+    return(out)
+}
+
+
+```
+
+
+# Load primary datasets
+```{r, eval = T}
+ACTIONet_summary = readr::read_rds(file.path(dataset.path, "ACTIONet_summary_filtered_individuals.rds"))
+
+pb.logcounts = readr::read_rds(file.path(dataset.path, "PB_mean_logcounts_final.RDS"))
+
+color.df = readRDS(file.path(dataset.path, "celltype_colors.rds"))
+
+colors = color.df$color
+names(colors) = color.df$celltype
+
+```
+
+
+
+# Plot main ACTIONet
+## Celltypes
+```{r}
+# annotated
+gg1 = plot.ACTIONet(ACTIONet_summary$ACTIONet2D, ACTIONet_summary$metadata$Labels, palette = colors, text_size = 2, use_repel = T)
+
+png(file.path(figures.path, "ACTIONet", "ACTIONet_annotated.png"), width = 1600, height = 1200, res = 150)
+plot(gg1)
+dev.off()
+
+gg2 = plot.ACTIONet(ACTIONet_summary$ACTIONet2D, ACTIONet_summary$metadata$Labels, palette = colors, text_size = 2, use_repel = T, add_text_labels = F)
+
+png(file.path(figures.path, "ACTIONet", "ACTIONet_annotated_no_labels.png"), width = 1600, height = 1200, res = 150)
+plot(gg2)
+dev.off()
+
+```
+
+
+## Supps
+### # Phenotype
+```{r}
+gg2 = plot.ACTIONet(ACTIONet_summary$ACTIONet2D, ACTIONet_summary$metadata$Phenotype, palette = c("#cccccc", "#888888"), text_size = 2, use_repel = T, add_text_labels = F, point_size = 0.5)
+
+png(file.path(figures.path, "ACTIONet", "ACTIONet_phenotype_annotated_no_labels.png"), width = 1600, height = 1200, res = 150)
+plot(gg2)
+dev.off()
+```
+
+### Batch
+```{r}
+gg2 = plot.ACTIONet(ACTIONet_summary$ACTIONet2D, ACTIONet_summary$metadata$Batch, text_size = 2, use_repel = T, add_text_labels = F, point_size = 0.5)
+
+png(file.path(figures.path, "ACTIONet", "ACTIONet_batch_annotated_no_labels.png"), width = 1600, height = 1200, res = 150)
+plot(gg2)
+dev.off()
+```
+
+### Gender
+```{r}
+mask = !is.na(ACTIONet_summary$metadata$Gender)
+gg2 = plot.ACTIONet(ACTIONet_summary$ACTIONet2D[mask, ], ACTIONet_summary$metadata$Gender[mask], text_size = 2, use_repel = T, add_text_labels = F, point_size = 0.5, palette = c("pink", "#91bfdb"))
+
+png(file.path(figures.path, "ACTIONet", "ACTIONet_gender_annotated_no_labels.png"), width = 1600, height = 1200, res = 150)
+plot(gg2)
+dev.off()
+```
+
+## Archetype
+```{r}
+gg2 = plot.ACTIONet(ACTIONet_summary$ACTIONet2D, ACTIONet_summary$metadata$assigned_archetype, text_size = 2, use_repel = T, add_text_labels = F, point_size = 0.5, palette = as.character(pals::polychrome(31)))
+
+png(file.path(figures.path, "ACTIONet", "ACTIONet_archetypes_annotated_no_labels.png"), width = 1600, height = 1200, res = 150)
+plot(gg2)
+dev.off()
+```
+## Archetype
+```{r}
+gg2 = plot.ACTIONet(ACTIONet_summary$ACTIONet2D, ACTIONet_summary$metadata$dataset, text_size = 2, use_repel = T, add_text_labels = F, point_size = 0.5, palette = c("#f1a340", "#998ec3"))
+
+png(file.path(figures.path, "ACTIONet", "ACTIONet_datasets_annotated_no_labels.png"), width = 1600, height = 1200, res = 150)
+plot(gg2)
+dev.off()
+
+```
+
+
+## Plot ACTIONet plots per dataset
+### McLean dataset
+```{r}
+mask = ACTIONet_summary$metadata$dataset == "McLean"
+DS1.coors = ACTIONet_summary$ACTIONet2D[mask, ]
+DS1.labels = ACTIONet_summary$metadata$Labels[mask]
+
+gg3 = plot.ACTIONet(DS1.coors, DS1.labels, palette = colors, text_size = 2, use_repel = T)
+
+png(file.path(figures.path, "ACTIONet", "ACTIONet_annotated_DS1.png"), width = 1600, height = 1200, res = 150)
+plot(gg3)
+dev.off()
+
+gg4 = plot.ACTIONet(DS1.coors, DS1.labels, palette = colors, text_size = 2, use_repel = T, add_text_labels = F)
+
+png(file.path(figures.path, "ACTIONet", "ACTIONet_annotated_no_labels_DS1.png"), width = 1600, height = 1200, res = 150)
+plot(gg4)
+dev.off()
+
+```
+
+### MtSinai dataset
+```{r}
+mask = ACTIONet_summary$metadata$dataset == "MtSinai"
+DS2.coors = ACTIONet_summary$ACTIONet2D[mask, ]
+DS2.labels = ACTIONet_summary$metadata$Labels[mask]
+
+gg5 = plot.ACTIONet(DS1.coors, DS1.labels, palette = colors, text_size = 2, use_repel = T)
+
+png(file.path(figures.path, "ACTIONet", "ACTIONet_annotated_DS2.png"), width = 1600, height = 1200, res = 150)
+plot(gg5)
+dev.off()
+
+gg6 = plot.ACTIONet(DS1.coors, DS1.labels, palette = colors, text_size = 2, use_repel = T, add_text_labels = F)
+
+png(file.path(figures.path, "ACTIONet", "ACTIONet_annotated_no_labels_DS2.png"), width = 1600, height = 1200, res = 150)
+plot(gg6)
+dev.off()
+
+```
+
+
+
+
+# Plot cell type fraction stats
+```{r}
+require(ggpubr)
+
+ncells = sapply(int_colData(pb.logcounts)$n_cells, as.numeric)
+rownames(ncells) = names(assays(pb.logcounts))
+
+cs = Matrix::colSums(ncells)
+ncells.freq = 100*scale(ncells, center = F, scale = cs)
+# Ex.perc = (fast_column_sums(ncells.freq[grepl("^Ex", rownames(ncells.freq)) & !grepl("^Ex-NRGN", rownames(ncells.freq)), ]))
+Ex.perc = (fast_column_sums(ncells.freq[grepl("^Ex", rownames(ncells.freq)), ]))
+
+df = data.frame(sample = colnames(ncells), perc = Ex.perc)
+gg = ggdensity(df, x = "perc", fill = "lightgray",
+   add = "mean", rug = TRUE)
+pdf(file.path(figures.path, "Ex_perc_density.pdf"), height = 4, width = 5)
+print(gg)
+dev.off()
+
+
+ncells.freq = ncells.freq[, order(Ex.perc, decreasing = T)]
+Ex.perc = (fast_column_sums(ncells.freq[grepl("^Ex", rownames(ncells.freq)) & !grepl("^Ex-NRGN", rownames(ncells.freq)), ]))
+
+mask = (Ex.perc >= 10) & (Ex.perc <= 80) 
+ncells.freq = ncells.freq[, mask]
+
+# 
+# 
+# X = ncells.freq[, pb.logcounts$Cohort[match(colnames(ncells.freq), pb.logcounts$ID)] == "McLean"]
+# df = reshape2::melt(X)
+# colnames(df)=c("celltype", "sample", "freq")
+# 
+# df$celltype = factor(df$celltype, names(colors))
+# # df$sample = droplevels(factor(df$sample, colnames(ncells.freq)[sample.perm]))
+# 
+# gg.ds1 = ggbarplot(df, "sample", "freq",
+#   fill = "celltype", color = "black", palette = colors[levels(df$celltype)], xlab = "Individual", ylab = "Percentage") + theme(axis.text.x = element_text(face="bold", size=0, angle=90), axis.text.y = element_text(face="bold", size=12, angle=0), axis.title = element_text(face="bold", size=18, angle=0))
+# 
+# 
+# pdf(file.path(figures.path, 'celltype_perc_McLean.pdf'), width = 10, height = 6)
+# print(gg.ds1)
+# dev.off()
+# 
+# 
+# 
+# X = ncells.freq[, pb.logcounts$Cohort[match(colnames(ncells.freq), pb.logcounts$ID)] != "McLean"]
+# df = reshape2::melt(X)
+# colnames(df)=c("celltype", "sample", "freq")
+# 
+# df$celltype = factor(df$celltype, names(colors))
+# # df$sample = droplevels(factor(df$sample, colnames(ncells.freq)[sample.perm]))
+# 
+# gg.ds2 = ggbarplot(df, "sample", "freq",
+#   fill = "celltype", color = "black", palette = colors[levels(df$celltype)], xlab = "Individual", ylab = "Percentage") + theme(axis.text.x = element_text(face="bold", size=0, angle=90), axis.text.y = element_text(face="bold", size=12, angle=0), axis.title = element_text(face="bold", size=18, angle=0))
+# 
+# 
+# pdf(file.path(figures.path, 'celltype_perc_MtSinai.pdf'), width = 10, height = 6)
+# print(gg.ds2)
+# dev.off()
+# 
+# 
+# pdf(file.path(figures.path, 'celltype_perc_combined.pdf'), width = 18, height = 6)
+# gridExtra::grid.arrange(gg.ds1, gg.ds2, nrow = 1)
+# dev.off()
+# 
+# 
+# 
+# 
+# df$celltype = factor(df$celltype, names(colors))
+# # df$sample = droplevels(factor(df$sample, colnames(ncells.freq)[sample.perm]))
+# 
+# gg.ds2 = ggbarplot(df, "sample", "freq",
+#   fill = "celltype", color = "black", palette = colors[levels(df$celltype)], xlab = "Individual", ylab = "Percentage") + theme(axis.text.x = element_text(face="bold", size=0, angle=90), axis.text.y = element_text(face="bold", size=12, angle=0), axis.title = element_text(face="bold", size=18, angle=0))
+# 
+# 
+
+
+
+
+X = ncells.freq
+df = reshape2::melt(X)
+colnames(df)=c("celltype", "sample", "freq")
+
+df$celltype = factor(df$celltype, names(colors))
+
+gg.combined = ggbarplot(df, "sample", "freq",
+  fill = "celltype", color = "black", palette = colors[levels(df$celltype)], xlab = "Individual", ylab = "Percentage") + theme(axis.text.x = element_text(face="bold", size=8, angle=90,hjust=0.95,vjust=0.2), axis.text.y = element_text(face="bold", size=12, angle=0), axis.title = element_text(face="bold", size=18, angle=0))
+
+pdf(file.path(figures.path, 'celltype_perc_joint.pdf'), width = 16, height = 6)
+print(gg.combined)
+dev.off()
+
+
+
+
+
+X = ncells.freq[, pb.logcounts$Phenotype[match(colnames(ncells.freq), pb.logcounts$ID)] == "CON"]
+df = reshape2::melt(X)
+colnames(df)=c("celltype", "sample", "freq")
+
+df$celltype = factor(df$celltype, names(colors))
+
+gg.combined = ggbarplot(df, "sample", "freq",
+  fill = "celltype", color = "black", palette = colors[levels(df$celltype)], xlab = "Individual", ylab = "Percentage") + theme(axis.text.x = element_text(face="bold", size=8, angle=90,hjust=0.95,vjust=0.2), axis.text.y = element_text(face="bold", size=12, angle=0), axis.title = element_text(face="bold", size=18, angle=0))
+
+pdf(file.path(figures.path, 'celltype_perc_CON.pdf'), width = 12, height = 6)
+print(gg.combined)
+dev.off()
+
+
+
+X = ncells.freq[, pb.logcounts$Phenotype[match(colnames(ncells.freq), pb.logcounts$ID)] == "SZ"]
+df = reshape2::melt(X)
+colnames(df)=c("celltype", "sample", "freq")
+
+df$celltype = factor(df$celltype, names(colors))
+
+gg.combined = ggbarplot(df, "sample", "freq",
+  fill = "celltype", color = "black", palette = colors[levels(df$celltype)], xlab = "Individual", ylab = "Percentage") + theme(axis.text.x = element_text(face="bold", size=8, angle=90,hjust=0.95,vjust=0.2), axis.text.y = element_text(face="bold", size=12, angle=0), axis.title = element_text(face="bold", size=18, angle=0))
+
+pdf(file.path(figures.path, 'celltype_perc_SZ.pdf'), width = 12, height = 6)
+print(gg.combined)
+dev.off()
+
+
+
+
+```
+
+# Plot cell type fraction stats per phenotype
+```{r}
+n_cells = table(ACTIONet_summary$metadata$Labels, ACTIONet_summary$metadata$Individual)
+
+X.CON = apply(n_cells[, pb.logcounts$Phenotype == "CON"], 2, as.numeric)
+X.SZ = apply(n_cells[, pb.logcounts$Phenotype == "SZ"], 2, as.numeric)
+rownames(X.CON) = rownames(X.SZ) = names(assays(pb.logcounts))
+
+
+# wilcox.out = presto::wilcoxauc(cbind(X.CON, X.SZ), c(rep("CON", ncol(X.CON)), rep("SZ", ncol(X.SZ))))
+# wilcox.out = wilcox.out[wilcox.out$group == "SZ", ]
+
+
+Perc = t(apply(cbind(Matrix::rowMeans(X.CON), Matrix::rowMeans(X.SZ)), 1, function(x) 100*x / sum(x)))
+colnames(Perc) = c("CON", "SZ")
+Perc = Perc[order(Perc[, 1] - Perc[, 2], decreasing = T), ]
+# df = Perc[wilcox.out$feature[order(-log10(wilcox.out$pval)*sign(wilcox.out$logFC))], ]
+df = reshape2::melt(Perc)
+colnames(df) = c("Celltype", "Phenotype", "Perc")
+df$Celltype = factor(df$Celltype, names(colors))
+
+gg = ggbarplot(df, "Celltype", "Perc", fill = "Phenotype", palette = c("#cccccc", "#888888"))+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, colour = colors)) + xlab("Celltype") + ylab("Percentage")
+
+pdf(file.path(figures.path, "Celltype_perc_per_phenotype.pdf"), height = 5, width = 8)
+print(gg)
+dev.off()
+
+
+
+
+```
+
+
+
+# Plot gene/umi statistics
+## Per cell type
+```{r}
+umis = ACTIONet_summary$metadata$umi_count
+mito.perc = ACTIONet_summary$metadata$mito_perc
+genes = ACTIONet_summary$metadata$gene_counts
+dataset = ACTIONet_summary$metadata$dataset
+indiv = ACTIONet_summary$metadata$Individual
+celltype = ACTIONet_summary$metadata$Labels
+df = data.frame(celltype = celltype, umis = umis, genes = genes, mito = mito.perc, dataset = dataset, individual = indiv)  
+
+df = df[df$individual %in% colnames(pb.logcounts)[mask == T], ]
+
+df$celltype = factor(df$celltype, names(colors))
+
+require(ggpubr)
+gg.umis.1 = ggviolin(df[df$dataset == "McLean", ], "celltype", "umis", fill = "celltype", palette = colors,
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Celltype") + ylab("UMIs")+ theme(legend.position = "none")
+
+png(file.path(figures.path, "McLean_UMIs.png"), width = 1200, height = 600, res = 150)
+print(gg.umis.1)
+dev.off()
+
+gg.umis.2 = ggviolin(df[df$dataset == "MtSinai", ], "celltype", "umis", fill = "celltype", palette = colors,
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Celltype") + ylab("UMIs")+ theme(legend.position = "none")
+
+png(file.path(figures.path, "MtSinai_UMIs.png"), width = 1200, height = 600, res = 150)
+print(gg.umis.2)
+dev.off()
+
+
+require(ggpubr)
+gg.genes.1 = ggviolin(df[df$dataset == "McLean", ], "celltype", "genes", fill = "celltype", palette = colors,
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Celltype") + ylab("genes")+ theme(legend.position = "none")
+
+png(file.path(figures.path, "McLean_genes.png"), width = 1200, height = 600, res = 150)
+print(gg.genes.1)
+dev.off()
+
+gg.genes.2 = ggviolin(df[df$dataset == "MtSinai", ], "celltype", "genes", fill = "celltype", palette = colors,
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Celltype") + ylab("genes")+ theme(legend.position = "none")
+
+png(file.path(figures.path, "MtSinai_genes.png"), width = 1200, height = 600, res = 150)
+print(gg.genes.2)
+dev.off()
+
+require(ggpubr)
+gg.mito.1 = ggviolin(df[df$dataset == "McLean", ], "celltype", "mito", fill = "celltype", palette = colors,
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Celltype") + ylab("mito") + ylim(c(0, 10))+ theme(legend.position = "none")
+
+png(file.path(figures.path,"McLean_mito.png"), width = 1200, height = 600, res = 150)
+print(gg.mito.1)
+dev.off()
+
+gg.mito.2 = ggviolin(df[df$dataset == "MtSinai", ], "celltype", "mito", fill = "celltype", palette = colors,
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Celltype") + ylab("mito") + ylim(c(0, 10))+ theme(legend.position = "none")
+
+png(file.path(figures.path, "MtSinai_mito.png"), width = 1200, height = 600, res = 150)
+print(gg.mito.2)
+dev.off()
+
+```
+
+## Per sample
+```{r}
+df$individual = factor(as.character(df$individual), as.character(pb.logcounts$ID[order(pb.logcounts$umis, decreasing = T)]))
+
+require(ggpubr)
+gg.umis.1 = ggviolin(df[df$dataset == "McLean", ], "individual", "umis", fill = "individual", add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Individual") + ylab("UMIs")+ theme(legend.position = "none")
+
+
+png(file.path(figures.path, "McLean_UMIs_per_sample.png"), width = 1200, height = 500, res = 150)
+print(gg.umis.1)
+dev.off()
+
+gg.umis.2 = ggviolin(df[df$dataset == "MtSinai", ], "individual", "umis", fill = "individual",
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Celltype") + ylab("UMIs")+ theme(legend.position = "none")
+
+png(file.path(figures.path, "MtSinai_UMIs_per_sample.png"), width = 2100, height = 500, res = 150)
+print(gg.umis.2)
+dev.off()
+
+
+
+df$individual = factor(as.character(df$individual), as.character(pb.logcounts$ID[order(pb.logcounts$genes, decreasing = T)]))
+
+require(ggpubr)
+gg.genes.1 = ggviolin(df[df$dataset == "McLean", ], "individual", "genes", fill = "individual",
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Celltype") + ylab("genes")+ theme(legend.position = "none")
+
+png(file.path(figures.path, "McLean_genes_per_sample.png"), width = 1200, height = 500, res = 150)
+print(gg.genes.1)
+dev.off()
+
+gg.genes.2 = ggviolin(df[df$dataset == "MtSinai", ], "individual", "genes", fill = "individual",
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Celltype") + ylab("genes")+ theme(legend.position = "none")
+
+png(file.path(figures.path, "MtSinai_genes_per_sample.png"), width = 2100, height = 500, res = 150)
+print(gg.genes.2)
+dev.off()
+
+df$individual = factor(as.character(df$individual), as.character(pb.logcounts$ID[order(pb.logcounts$mito_perc, decreasing = T)]))
+
+require(ggpubr)
+gg.mito.1 = ggviolin(df[df$dataset == "McLean", ], "individual", "mito", fill = "individual",
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Celltype") + ylab("mito")+ theme(legend.position = "none") + ylim(c(0, 10))
+
+png(file.path(figures.path,"McLean_mito_per_sample.png"), width = 1200, height = 500, res = 150)
+print(gg.mito.1)
+dev.off()
+
+gg.mito.2 = ggviolin(df[df$dataset == "MtSinai", ], "individual", "mito", fill = "individual",
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Celltype") + ylab("mito")+ theme(legend.position = "none") + ylim(c(0, 10))
+
+png(file.path(figures.path, "MtSinai_mito_per_sample.png"), width = 2100, height = 500, res = 150)
+print(gg.mito.2)
+dev.off()
+
+```
+
+
+# Plot mappings of cell type annotations to other annotations
+## Load markers
+```{r}
+data("curatedMarkers_human")
+Layers = readRDS("~/results/input/Yao_layer_marker.RDS")
+rdbu_fun = circlize::colorRamp2(c(-3, -1, 0, 1, 3), rev(pals::brewer.rdbu(9)[seq(1, 9, by = 2)]))
+
+celltype.gene.spec = readRDS(file.path(dataset.path, "celltype_gene_specificity.rds"))
+
+```
+
+## Annotate
+### Layers (Maynard et al., 2021)
+```{r}
+X = as(do.call(cbind, lapply(Layers[c(2:7, 1)], function(gs) as.numeric(rownames(pb.logcounts) %in% gs))), "dgCMatrix")
+rownames(X) = rownames(pb.logcounts)
+Layer.annot = assess.geneset.enrichment.from.scores(celltype.gene.spec, X)
+
+Z  = scale(t(Layer.annot$logPvals))
+rownames(Z) = colnames(celltype.gene.spec)
+# Z = scale(ct.layer.annot$Enrichment)
+colnames(Z) = c(paste("L", c(1:6), sep = ""), "WM")
+
+pdf(file.path(figures.path, "annotations", "Layer_annotation_Maynard.pdf"), width = 4)
+Heatmap(Z, cluster_rows = F, cluster_columns = F, rect_gp = gpar(col = "black"), row_names_side = "left", row_names_gp = gpar(col = colors), col = rdbu_fun, name = "Layer", column_title = "Layer (Maynard et al.)")
+dev.off()
+```
+
+### Cell types (Mohammadi et al., 2019)
+```{r}
+
+X = as(do.call(cbind, lapply(curatedMarkers_human$Brain$PFC$Mohammadi2020$marker.genes, function(gs) as.numeric(rownames(pb.logcounts) %in% gs))), "dgCMatrix")
+rownames(X) = rownames(pb.logcounts)
+Celltype.annot = assess.geneset.enrichment.from.scores(celltype.gene.spec, X)
+
+Z  = scale(t(Celltype.annot$logPvals))
+rownames(Z) = colnames(celltype.gene.spec)
+
+
+M = as(t(MWM_hungarian(t(Celltype.annot$logPvals))), "dgTMatrix")
+
+pdf(file.path(figures.path, "annotations", "celltype_annotation_mohammadi_markers.pdf"), width = 6)
+Heatmap(Z[, M@i+1], cluster_rows = F, cluster_columns = F, rect_gp = gpar(col = "black"), row_names_side = "left", row_names_gp = gpar(col = colors), col = rdbu_fun, name = "Celltypes", column_title = "Celltypes (Mohammadi et al.)")
+dev.off()
+
+```
+
+### Cell types (Velmeshev et al., 2019)
+```{r}
+X = as(do.call(cbind, lapply(curatedMarkers_human$Brain$PFC$Velmeshev2019$marker.genes, function(gs) as.numeric(rownames(pb.logcounts) %in% gs))), "dgCMatrix")
+rownames(X) = rownames(pb.logcounts)
+Celltype.annot = assess.geneset.enrichment.from.scores(celltype.gene.spec, X)
+
+
+
+Z  = scale(t(Celltype.annot$logPvals))
+rownames(Z) = colnames(celltype.gene.spec)
+
+
+M = as(t(MWM_hungarian(t(Celltype.annot$logPvals))), "dgTMatrix")
+
+
+pdf(file.path(figures.path, "annotations", "celltype_annotation_velmeshev_markers.pdf"), width = 8)
+Heatmap(Z[, M@i+1], cluster_rows = F, cluster_columns = F, rect_gp = gpar(col = "black"), row_names_side = "left", row_names_gp = gpar(col = colors), col = rdbu_fun, name = "Celltypes", column_title = "Celltypes (Velmeshev et al.)")
+dev.off()
+```
+### Cell types (Mathys et al., 2019)
+```{r}
+X = as(do.call(cbind, lapply(curatedMarkers_human$Brain$PFC$MathysDavila2019$marker.genes, function(gs) as.numeric(rownames(pb.logcounts) %in% gs))), "dgCMatrix")
+rownames(X) = rownames(pb.logcounts)
+Celltype.annot = assess.geneset.enrichment.from.scores(celltype.gene.spec, X)
+
+
+
+Z  = scale(t(Celltype.annot$logPvals))
+rownames(Z) = colnames(celltype.gene.spec)
+
+
+M = as(t(MWM_hungarian(t(Celltype.annot$logPvals))), "dgTMatrix")
+
+
+pdf(file.path(figures.path, "annotations", "celltype_annotation_mathys_markers.pdf"), width = 8)
+Heatmap(Z[, M@i+1], cluster_rows = F, cluster_columns = F, rect_gp = gpar(col = "black"), row_names_side = "left", row_names_gp = gpar(col = colors), col = rdbu_fun, name = "Celltypes", column_title = "Celltypes (Mathys and Davilla et al.)")
+dev.off()
+
+```
+## Bulk Layers (He et al., 2017)
+```{r}
+X = as(do.call(cbind, lapply(curatedMarkers_human$Brain$Layers$marker.genes, function(gs) as.numeric(rownames(pb.logcounts) %in% gs))), "dgCMatrix")
+rownames(X) = rownames(pb.logcounts)
+Celltype.annot = assess.geneset.enrichment.from.scores(celltype.gene.spec, X)
+
+
+
+Z  = scale(t(Celltype.annot$logPvals))
+rownames(Z) = colnames(celltype.gene.spec)
+
+
+pdf(file.path(figures.path, "annotations", "Layer_annotation_He_markers.pdf"), width = 4)
+Heatmap(Z, cluster_rows = F, cluster_columns = F, rect_gp = gpar(col = "black"), row_names_side = "left", row_names_gp = gpar(col = colors), col = rdbu_fun, name = "Layers", column_title = "Layers (He et al.)")
+dev.off()
+```
+
+
+
+
