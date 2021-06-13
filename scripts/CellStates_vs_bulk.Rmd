@@ -4,7 +4,7 @@ output: html_notebook
 ---
 # Setup
 ```{r include=FALSE}
-library(org.Hs.eg.db)
+# library(org.Hs.eg.db)
 require(ACTIONet)
 require(stringr)
 require(ComplexHeatmap)
@@ -44,6 +44,8 @@ DE.sc = DE.new$DE.sc
 
 ```
 
+
+
 # Load bulk expression
 ```{r}
 bulk = readr::read_rds("~/results/input/MPP_bulk_expression_SZandCON.rds")
@@ -51,6 +53,26 @@ bulk.profile = assays(bulk)$voom
 bulk.profile.orth = orthoProject(bulk.profile, Matrix::rowMeans(bulk.profile))
 
 ```
+
+
+```{r}
+mask = pb.logcounts$POP.EL3SD == "EUR"
+table(pb.logcounts$Cohort[mask])
+
+
+cor.test(pb.logcounts$TPS.All[mask], pb.logcounts$PRS[mask], method = "pearson")
+
+
+cor.test(pb.logcounts$A29.signature[mask], pb.logcounts$TPS.All[mask], method = "pearson")
+
+
+```
+```{r}
+data()
+
+```
+
+
 
 ```{r}
 arch.annot = annotate.archetypes.using.labels(t(ACTIONet_summary$H_unified), ACTIONet_summary$metadata$Labels)
@@ -129,6 +151,7 @@ dev.off()
 
 
 ```
+
 
 
 ```{r}
@@ -426,11 +449,30 @@ cell.df2 = reshape2::melt(cell.df)
 colnames(cell.df2)[[3]] = "Archetype"
 cell.df2$Celltype = factor(cell.df2$Celltype, names(colors))
 
+
+
 gg = ggbarplot(cell.df2, "Archetype", "value", fill = "Celltype", palette = colors, position = position_dodge(), add = "mean_se") + ylab("Archetype score (scaled)")
 
 pdf(file.path(figures.path, "Cellstates_vs_celltypes_neuro_plusNRGN.pdf"), width = 12, height = 5)
 plot(gg)
 dev.off()
+
+
+sub.cell.df2 = cell.df2[cell.df2$Archetype == "A17", ]
+IDX = split(sub.cell.df2$value, sub.cell.df2$Celltype)
+
+cls = scales::col_numeric(pals::brewer.rdbu(9), domain = NULL)(sapply(IDX, mean))
+names(cls) = names(IDX)
+sub.cell.df2$color = cls[sub.cell.df2$Celltype]
+
+sub.cell.df2$Celltype = factor(sub.cell.df2$Celltype, names(IDX)[order(sapply(IDX, mean), decreasing = T)])
+
+gg = ggbarplot(sub.cell.df2, "Celltype", "value", fill = "Celltype", palette = colors, position = position_dodge(), add = "mean_se") + ylab("Archetype score (scaled)") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color=colors))
+
+pdf(file.path(figures.path, "Cellstates_vs_celltypes_neuro_plusNRGN_SZTR_only_small.pdf"), width = 5, height = 5)
+plot(gg)
+dev.off()
+
 
 
 ```

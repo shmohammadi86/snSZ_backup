@@ -71,48 +71,17 @@ names(colors) = color.df$celltype
 
 # Load DE results
 ```{r, eval = T}
-resDE = readr::read_rds(file.path(dataset.path, "Cohort_specific_DE_results.rds"))
-filtered.tables = readr::read_rds(file.path(dataset.path, "Cohort_specific_DE_results_filtered.rds"))
-combined.analysis.tables = readr::read_rds(file.path(dataset.path, "meta_analysis_results.rds"))
-
-DE.new = readRDS(file.path(dataset.path, "DE_genes_pseudobulk.rds"))
-
-Up.genes = DE.new$Up.genes
-Down.genes = DE.new$Down.genes
-DE.scores = sign(DE.new$logFC) * (DE.new$logPvals) # tstats
-DE.scores.sig = DE.scores
-DE.scores.sig[(abs(DE.new$logFC) < 0.1) | (DE.new$logPvals < -log10(0.05))] = 0
-
 rdbu_fun = circlize::colorRamp2(c(-3, log10(0.05), 0, -log10(0.05), 3), rev(pals::brewer.rdbu(9)[seq(1, 9, by = 2)]))
 
-sorted.celltypes = intersect(color.df$celltype, names(DE.new$Up.genes))
 
-```
-
-
-# Map DE genes to the most dysregulated cell types
-```{r}
-top.scores = apply(DE.scores.sig, 1, function(x) {x[which.max(abs(x))]})
-
-
-top.celltype = apply(DE.scores.sig, 1, function(x) {colnames(DE.scores.sig)[which.max(abs(x))]})
-assigned.genes2celltype.df = data.frame(gene = rownames(DE.scores.sig), celltype = top.celltype, score = top.scores)
-assigned.genes2celltype.df$dir = "."
-assigned.genes2celltype.df$dir[assigned.genes2celltype.df$score > 0] = "Up"
-assigned.genes2celltype.df$dir[assigned.genes2celltype.df$score < 0] = "Down"
-
-```
-
-# Bulk DE scores
-```{r}
 bulk.DE = read.csv("~/results/input/PEC_DE_table.csv", sep = "\t")
 DE.genes = readr::read_rds("~/results/input/SCZ_associated_genesets.rds")
 bulkDE.genes = intersect(bulk.DE$gene_name, sort(unique(union(DE.genes$`DE.Up (PEC)`, DE.genes$`DE.Down (PEC)`))))
 bulk.scores = -log10(bulk.DE$SCZ.p.value[match(bulkDE.genes, bulk.DE$gene_name)])
 names(bulk.scores) = bulkDE.genes
 
-```
 
+```
 
 
 ## Load significant variants and mapped genes
@@ -136,20 +105,6 @@ PGC3.all.genes = intersect(PGC3.all.genes.raw, rownames(DE.scores))
 
 
   
-PGC3.loci$selected.genes = sapply(PGC3.loci$ENSEMBL.genes..all..clear.names., function(str) {
-  if(str == "-") {
-    return("-")
-  }
-  gs = intersect(str_split(str, ",")[[1]], assigned.genes2celltype.df$gene)
-  if(length(gs) == 0)
-    return("-")
-  else 
-    ss = abs(assigned.genes2celltype.df$score[match(gs, assigned.genes2celltype.df$gene)])
-    if(sum(abs(ss)) == 0)
-      return("-")
-    else
-      return(gs[which.max(ss)])
-})
 PGC3.loci$bulk.selected.genes = sapply(PGC3.loci$ENSEMBL.genes..all..clear.names., function(str) {
   if(str == "-") {
     return("-")
@@ -176,21 +131,19 @@ PGC3.loci.finemapped.filtered$match.finemapping = PGC3.loci.finemapped.filtered$
 
 ```
 
-```{r}
-print(sum(PGC3.loci$selected.genes != "-")) # 129
 
-
-```
 
 
 ```{r}
+print(sum(PGC3.loci$selected.genes != "-")) # 132 -> 103 had finemaps
+
 proximal.genes = as.numeric(sapply(PGC3.loci.finemapped.filtered$ENSEMBL.genes..all..clear.names., function(str) length(str_split(str, ",")[[1]])))
 success.p = 1/proximal.genes
-is.success = as.numeric(PGC3.loci.finemapped.filtered$match.finemapping) # 41/97 success
+is.success = as.numeric(PGC3.loci.finemapped.filtered$match.finemapping) # 25/103 success
 # bino.logpvals = -log10(pbinom(0, size = 1, prob = success.p, lower.tail = F))
 
 require(poibin)
-pbino.pval = 1-ppoibin(sum(is.success), success.p, method = "DFT-CF",wts=NULL) # p-value: 1.458567e-11
+pbino.pval = 1-ppoibin(sum(is.success), success.p, method = "DFT-CF",wts=NULL) # p-value: 1.765768e-05
 
 print(length(proximal.genes))
 print(sum(is.success))
@@ -311,8 +264,8 @@ Dd$Point.col = "#000000"
 
 ```{r}
 # png(file.path(figures.path, "GWAS_panels", "SCZ_Manh_v4.png"), width = 12, height = 6)
-png("~/PFC_v3/figures/SCZ_Manh_v4.png", width = 2400, height = 1200, res = 300)
-manhattan.plot(Dd, cex = 0.15, cex.axis = 0.5, suggestiveline = F, ylim = c(0, -log10(min(SCZ.GWAS$P))), annotateLabels = NULL)
+png(file.path(figures.path, "SCZ_Manh_v4.png"), width = 2400, height = 1200, res = 300)
+manhattan.plot(Dd, cex = 0.15, cex.axis = 0.5, suggestiveline = F, ylim = c(0, -log10(min(SCZ.GWAS$P))), annotateLabels = NULL, precolor = F)
 dev.off()
 
 ```
@@ -329,10 +282,10 @@ manhattan.plot(Xd, cex = 0.15, cex.axis = 0.5, suggestiveline = F, ylim = c(0, -
 dev.off()
 
 
-pdf(file.path(figures.path, "GWAS_panels", "SCZ_Manh_sigOnly_aligned_v4.pdf"), width = 12, height = 6)
-# png("SCZ_Manh_all_aligned.png", width = 2400, height = 1200, res = 300)
-manhattan.plot(X, cex = 0.15, cex.axis = 0.5, suggestiveline = F, ylim = c(0, -log10(min(SCZ.GWAS$P))), annotateLabels = NULL)
-dev.off()
+# pdf(file.path(figures.path, "GWAS_panels", "SCZ_Manh_sigOnly_aligned_v4.pdf"), width = 12, height = 6)
+# # png("SCZ_Manh_all_aligned.png", width = 2400, height = 1200, res = 300)
+# manhattan.plot(X, cex = 0.15, cex.axis = 0.5, suggestiveline = F, ylim = c(0, -log10(min(SCZ.GWAS$P))), annotateLabels = NULL)
+# dev.off()
 
 ```
 
@@ -365,12 +318,18 @@ Xd$Labels = c(gg, "")
 
 
 pdf(file.path(figures.path, "GWAS_panels", "SCZ_Manh_sig_aligned_v4.pdf"), width = 12, height = 6)
-manhattan.plot(Xd, cex = 0.15, cex.axis = 0.5, suggestiveline = F, ylim = c(0, -log10(min(SCZ.GWAS$P))), annotateLabels = NULL)
+manhattan.plot(Xd, cex = 0.15, cex.axis = 0.5, suggestiveline = F, ylim = c(0, -log10(min(SCZ.GWAS$P))), annotateLabels = NULL, precolor = T)
 dev.off()
 
 pdf(file.path(figures.path, "GWAS_panels", "SCZ_Manh_sig_aligned_labels_v4.pdf"), width = 12, height = 6)
-manhattan.plot(Xd, cex = 0.15, cex.axis = 0.5, suggestiveline = F, ylim = c(0, -log10(min(SCZ.GWAS$P))), annotateLabels = T)
+manhattan.plot(Xd, cex = 0.15, cex.axis = 0.5, suggestiveline = F, ylim = c(0, -log10(min(SCZ.GWAS$P))), annotateLabels = T, precolor = T)
 dev.off()
+
+```
+
+```{r}
+sub.assigned.genes2celltype.df = assigned.genes2celltype.df[match(Xd$Labels[1:97], assigned.genes2celltype.df$gene), ]
+write.table(sub.assigned.genes2celltype.df, "~/results/figures/PGC3/SNP_to_gene_assignments_sig.tsv", sep = "\t", row.names = F, col.names = T, quote = F)
 
 ```
 

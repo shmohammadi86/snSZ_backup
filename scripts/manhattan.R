@@ -219,7 +219,7 @@ manhattan.compute <- function (x, chr = "CHR", bp = "BP", p = "P", snp = "SNP", 
 manhattan.plot <- function (d, chr = "CHR", bp = "BP", p = "P", snp = "SNP", col = c("gray10", 
                                                                                      "gray60"), chrlabs = NULL, suggestiveline = -log10(1e-05), 
                             genomewideline = -log10(5e-08), highlight = NULL, logp = TRUE, 
-                            annotatePval = NULL, annotateTop = TRUE, annotateLabels = NULL,...) {
+                            annotatePval = NULL, annotateTop = TRUE, annotateLabels = NULL, precolor = FALSE,...) {
   nchr = length(unique(d$CHR))
   
   if (nchr == 1) {
@@ -278,8 +278,13 @@ manhattan.plot <- function (d, chr = "CHR", bp = "BP", p = "P", snp = "SNP", col
   else {
     icol = 1
     for (i in unique(d$index)) {
-      with(d[d$index == unique(d$index)[i], ], points(pos, 
-                                                      logp, pch = 20,  col = Point.col, ...))
+      if(precolor == TRUE) {
+        with(d[d$index == unique(d$index)[i], ], points(pos, 
+                                                        logp, pch = 20,  col = Point.col, ...))
+      } else {
+        with(d[d$index == unique(d$index)[i], ], points(pos, 
+                                                        logp, pch = 20,  col = col[icol], ...))
+      }
       icol = icol + 1
     }
   }
