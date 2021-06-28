@@ -1,0 +1,554 @@
+---
+title: "Assess significance and relevance of cell states/archetypes"
+output: html_notebook
+---
+
+# Setup
+```{r include=FALSE}
+require(ACTIONet)
+require(stringr)
+require(ComplexHeatmap)
+
+
+dataset.path = "~/results/datasets/"
+results.path = "~/results"
+figures.folder = "~/results/figures"
+input.folder = "~/results/input"
+
+
+```
+
+
+## Enrichment function
+```{r}
+assess.genesets <-function (arch.gs, terms.gs, N, min.pval = 1e-100, correct = "none"){
+    shared = t(sapply(terms.gs, function(gs1) {
+        sapply(arch.gs, function(gs2) {
+            nn = intersect(gs1, gs2)
+        })
+    }))
+    colnames(shared) = names(arch.gs)
+    GS.sizes = sapply(terms.gs, length)
+    logPvals.out = sapply(1:ncol(shared), function(i) {
+        gg = shared[, i]
+        x = as.numeric(sapply(gg, length))
+        n.sample = length(arch.gs[[i]])
+        n.success = as.numeric(GS.sizes)
+        v = rep(1, length(x))
+        min.overlap = n.success * n.sample/N
+        idx = which(x >= min.overlap)
+        if (length(idx) == 0) 
+            return(v)
+        v[idx] = (phyper(x[idx]-1, n.sample, N-n.sample, n.success[idx], lower.tail = F))
+        # v[idx] = HGT_tail(population.size = N, success.count = n.success[idx], 
+        #     sample.size = n.sample, observed.success = x[idx])
+        return(v)
+    })
+    if(correct == "global") {
+      logPvals.out = matrix(p.adjust(logPvals.out, "fdr"), nrow = nrow(logPvals.out))
+    } else if(correct == "local") {
+      logPvals.out = apply(logPvals.out, 2, function(x) p.adjust(x, "fdr"))
+    }
+    rownames(logPvals.out) = names(terms.gs)
+    colnames(logPvals.out) = names(arch.gs)
+    return(-log10(Matrix::t(logPvals.out)))
+}
+
+
+assess.geneset.enrichment.from.archetypes <- function (ace, associations, min.counts = 0, specificity.slot = "unified_feature_specificity") 
+{
+    if(is.matrix(ace) | is.sparseMatrix(ace)) {
+      scores = as.matrix(ace)
+    } else {
+      scores = rowMaps(ace)[[specificity.slot]]  
+    }
+    if (max(scores) > 100) {
+        scores = log1p(scores)
+    }
+    if (is.list(associations)) {
+        associations = sapply(associations, function(gs) as.numeric(rownames(scores) %in% 
+            gs))
+        rownames(associations) = rownames(scores)
+    }
+    common.features = intersect(rownames(associations), rownames(scores))
+    rows = match(common.features, rownames(associations))
+    associations = as(associations[rows, ], "dgCMatrix")
+    scores = scores[common.features, ]
+    enrichment.out = assess_enrichment(scores, associations)
+    rownames(enrichment.out$logPvals) = colnames(associations)
+    rownames(enrichment.out$thresholds) = colnames(associations)
+    enrichment.out$scores = scores
+    return(enrichment.out)
+}
+
+annotate_H_with_markers <- function (ace, markers, features_use = NULL, significance_slot = "unified_feature_specificity") 
+{
+    features_use = ACTIONet:::.preprocess_annotation_features(ace, features_use)
+    marker_mat = ACTIONet:::.preprocess_annotation_markers(markers, features_use)
+    marker_stats = Matrix::t(assess.geneset.enrichment.from.archetypes(ace, 
+        marker_mat)$logPvals)
+    colnames(marker_stats) = colnames(marker_mat)
+    marker_stats[!is.finite(marker_stats)] = 0
+    annots = colnames(marker_mat)[apply(marker_stats, 1, which.max)]
+    conf = apply(marker_stats, 1, max)
+    out = list(Label = annots, Confidence = conf, Enrichment = marker_stats)
+    return(out)
+}
+
+
+```
+
+# Load primary datasets
+```{r, eval = T}
+ACTIONet_summary = readr::read_rds(file.path(dataset.path, "ACTIONet_summary_filtered_individuals.rds"))
+
+pb.logcounts = readr::read_rds(file.path(dataset.path, "PB_mean_logcounts_final.RDS"))
+
+color.df = readRDS(file.path(dataset.path, "celltype_colors.rds"))
+
+colors = color.df$color
+names(colors) = color.df$celltype
+
+```
+
+# Load DE results
+```{r, eval = F}
+resDE = readr::read_rds(file.path(dataset.path, "Cohort_specific_DE_results_final_wit_logumi_baseline_full_filter_extended_cell_filtering.rds"))
+
+filtered.tables = readr::read_rds(file.path(dataset.path, "individual_diff_results_filtered_full_wit_logumi_baseline_full_filter_extended_cell_filtering.rds"))
+
+DE.new = readRDS(file.path(dataset.path, "DE_genes_pseudobulk_final_wit_logumi_baseline_full_filter_extended_cell_filtering.rds"))
+
+Up.genes = DE.new$Up.genes
+Down.genes = DE.new$Down.genes
+
+```
+
+
+
+```{r}
+gene.spec = ACTIONet_summary$unified_feature_specificity
+
+gs = DE.new$Up.genes
+scores = (gene.spec)
+require(fgsea)
+Up.enrichment = sapply(gs, function(genes) {
+  l = as.numeric(rownames(scores) %in% genes)
+  print(sum(l))
+  pvals = apply(scores, 2, function(x) {
+    perm = order(x, decreasing = T)
+    sorted.l = l[perm]
+    mhg.out = mhg::mhg_test(sorted.l, length(l), sum(l), length(l)/4, 5, upper_bound = F, tol = 1e-300)   
+    mhg.out$pvalue
+  })
+  pvals[is.na(pvals)] = 1
+  -log10(pvals)
+
+  # gsea.out = fgsea(gs, x)
+  # -log10(gsea.out$padj)
+})
+Heatmap(Up.enrichment)
+
+
+
+
+gs = DE.new$Down.genes
+scores = (gene.spec)
+require(fgsea)
+Down.enrichment = sapply(gs, function(genes) {
+  l = as.numeric(rownames(scores) %in% genes)
+  print(sum(l))
+  pvals = apply(scores, 2, function(x) {
+    perm = order(x, decreasing = T)
+    sorted.l = l[perm]
+    mhg.out = mhg::mhg_test(sorted.l, length(l), sum(l), length(l)/4, 5, upper_bound = F, tol = 1e-300)   
+    mhg.out$pvalue
+  })
+  pvals[is.na(pvals)] = 1
+  -log10(pvals)
+
+  # gsea.out = fgsea(gs, x)
+  # -log10(gsea.out$padj)
+})
+Heatmap(Down.enrichment)
+
+
+
+arch.enrichment.DE.up = annotate.profile.using.markers(log1p(t(gene.spec)), )
+
+# arch.enrichment.DE.up = annotate.profile.using.markers(log1p(t(gene.spec)), DE.new$Up.genes)
+# arch.enrichment.DE.up = arch.enrichment.DE.up$Enrichment
+# 
+# arch.enrichment.DE.down = annotate.profile.using.markers(log1p(t(gene.spec)), DE.new$Down.genes)
+# arch.enrichment.DE.down = arch.enrichment.DE.down$Enrichment
+# 
+# arch.enrichment.DE.up[abs(arch.enrichment.DE.up) < 3] = 0
+# arch.enrichment.DE.down[abs(arch.enrichment.DE.down) < 3] = 0
+# Heatmap(arch.enrichment.DE.up) + Heatmap(arch.enrichment.DE.down) 
+
+
+arch.enrichment.phenotype = presto::wilcoxauc(t(ACTIONet_summary$H_unified), ACTIONet_summary$metadata$Phenotype)
+arch.enrichment.phenotype = matrix(arch.enrichment.phenotype$auc-0.5, nrow=ncol(ACTIONet_summary$H_unified))
+rownames(arch.enrichment.phenotype) = paste("A", 1:nrow(arch.enrichment.phenotype), sep = "")
+colnames(arch.enrichment.phenotype) = levels(ACTIONet_summary$metadata$Phenotype)
+
+arch.enrichment.ind = presto::wilcoxauc(t(ACTIONet_summary$H_unified), ACTIONet_summary$metadata$Individual)
+arch.enrichment.ind = matrix(arch.enrichment.ind$auc-0.5, nrow=ncol(ACTIONet_summary$H_unified))
+rownames(arch.enrichment.ind) = paste("A", 1:nrow(arch.enrichment.ind), sep = "")
+
+
+
+# Ll = as.character(ACTIONet_summary$metadata$Labels)
+# Ll[grep("^In", Ll)] = "In"
+# Ll[grep("^Ex", Ll)] = "Ex"
+# Ll = factor(Ll)
+arch.enrichment.celltype = presto::wilcoxauc(t(ACTIONet_summary$H_unified), ACTIONet_summary$metadata$Labels)
+rn = unique(arch.enrichment.celltype$group)
+arch.enrichment.celltype = matrix(arch.enrichment.celltype$auc-0.5, nrow=ncol(ACTIONet_summary$H_unified))
+rownames(arch.enrichment.celltype) = paste("A", 1:nrow(arch.enrichment.celltype), sep = "")
+colnames(arch.enrichment.celltype) = rn
+
+X = as.matrix(ACTIONet_summary$H_unified)
+Y = cbind(ACTIONet_summary$metadata$umi_count, ACTIONet_summary$metadata$gene_counts, ACTIONet_summary$metadata$mito_perc)
+arch.enrichment.geneumi = cor(X, Y)
+colnames(arch.enrichment.geneumi) = c("UMIs", "Genes", "Mito %")
+
+Heatmap(arch.enrichment.phenotype) + Heatmap(arch.enrichment.ind) + Heatmap(arch.enrichment.celltype)
+
+
+
+
+
+```
+
+
+
+
+```{r}
+ncells = sapply(int_colData(pb.logcounts)$n_cells, as.numeric)
+rownames(ncells) = names(assays(pb.logcounts))
+
+cs = Matrix::colSums(ncells)
+ncells.freq = 100*scale(ncells, center = F, scale = cs)
+Ex.perc = (fast_column_sums(ncells.freq[grepl("^Ex", rownames(ncells.freq)) & !grepl("^Ex-NRGN", rownames(ncells.freq)), ]))
+
+selected.samples = which((Ex.perc >= 10) & (Ex.perc <= 80))
+
+pb.logcounts.filtered = pb.logcounts [, selected.samples]
+
+```
+
+
+```{r}
+En = annotate.archetypes.using.labels(t(ACTIONet_summary$H_unified), ACTIONet_summary$metadata$Phenotype)
+perm = order(En$Enrichment[, 1], decreasing = T)
+
+Heatmap(En$Enrichment)
+
+```
+
+```{r}
+
+arch.sig.avg = as.matrix(sample.meta[, 33:36])
+med.mat = as.matrix(sample.meta[, 17:22])
+
+Arch.vs.Med.enrichment = apply(arch.sig.avg, 2, function(sig) {
+  perm = order(sig, decreasing = T)
+  X = med.mat[perm, ]
+  logPvals = apply(X, 2, function(x) {
+    l = as.numeric(x != 0)
+    mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l), 1, upper_bound = F, tol = 1e-100)
+    -log10(mhg.out$pvalue)
+  })
+  return(logPvals)
+})
+Heatmap(Arch.vs.Med.enrichment)
+
+(apply(arch.sig.avg, 2, function(x) cor(x, sample.meta$Age, method = "spearman")))
+
+apply(arch.sig.avg, 2, function(x) cor.test(x, as.numeric(factor(sample.meta$Phenotype)), method = "spearman", use = "complete.obs")$p.value)
+
+
+```
+
+
+# Load PEC data
+```{r}
+PEC.expr.table = read.table(file.path(input.folder, "DER-01_PEC_Gene_expression_matrix_normalized.txt"), header = T)
+rownames(PEC.expr.table) = PEC.expr.table$gene_id
+
+PEC.expr.mat = as.matrix(PEC.expr.table[, -1])
+
+
+library(org.Hs.eg.db)
+gg = as.character(sapply(PEC.expr.table$gene_id, function(str) str_split(str, fixed("."))[[1]][[1]]))
+suppressWarnings(ids <- AnnotationDbi::mapIds(org.Hs.eg.db, keys = gg, keytype = "ENSEMBL", column = "SYMBOL", multiVals = "first"))
+mask = !is.na(ids)
+
+PEC.expr.mat = PEC.expr.mat[mask, ]
+rownames(PEC.expr.mat) = ids[mask]
+
+
+
+
+PEC.expr.table.TPM = read.table(file.path(input.folder, "DER-02_PEC_Gene_expression_matrix_TPM.txt"), header = T)
+rownames(PEC.expr.table.TPM) = PEC.expr.table.TPM$GeneName
+
+PEC.expr.mat.TPM = as.matrix(PEC.expr.table.TPM[, -1])
+
+
+library(org.Hs.eg.db)
+mask = !is.na(ids)
+suppressWarnings(ids <- AnnotationDbi::mapIds(org.Hs.eg.db, keys = PEC.expr.table.TPM$GeneName, keytype = "ENSEMBL", column = "SYMBOL", multiVals = "first"))
+
+PEC.expr.mat.TPM = PEC.expr.mat.TPM[mask, ]
+rownames(PEC.expr.mat.TPM) = ids[mask]
+
+
+
+
+
+gg = sort(unique(intersect(rownames(PEC.expr.mat.TPM), rownames(PEC.expr.mat))))
+cc = sort(unique(intersect(colnames(PEC.expr.mat), colnames(PEC.expr.mat.TPM))))
+
+PEC.sce = SingleCellExperiment(assays = list(normexpr = PEC.expr.mat[gg, cc], TPM = PEC.expr.mat.TPM[gg, cc]))
+
+
+meta.PEC.full = read.table("~/results/input/Job-138522884223735377851224577.tsv", header = T, sep = "\t")
+
+
+meta.PEC = read.table("~/results/input/Job-138522891409304015015695443.tsv", header = T, sep = "\t")
+mask = meta.PEC$diagnosis %in% c("Control", "Schizophrenia")
+meta.PEC = meta.PEC[mask, ]
+
+common.samples = sort(unique(intersect((meta.PEC$individualID), (cc))))
+
+meta.PEC.matched = meta.PEC[match(common.samples, meta.PEC$individualID), ]
+PEC.sce.matched = PEC.sce[, match(common.samples, colnames(PEC.sce))]
+colData(PEC.sce.matched) = DataFrame(meta.PEC.matched)
+colnames(PEC.sce.matched) = PEC.sce.matched$individualID
+
+readr::write_rds(PEC.sce.matched, "~/results/input/PEC_bulk_expression_SZandCON.rds")
+
+```
+
+
+# A11 and A19 specific
+```{r}
+# 0   1 
+# 452 367
+SZ.mask = as.numeric(PEC.sce.matched$diagnosis == "Schizophrenia")
+
+
+X = assays(PEC.sce.matched)$normexpr
+arch.gene.spec = ACTIONet_summary$unified_feature_specificity
+
+cg = intersect(rownames(X), rownames(arch.gene.spec))
+subX = X[cg, ]
+subArch = arch.gene.spec[cg, ]
+
+Arch.cor = cor(subX, subArch)
+
+arch.enrichment = apply(Arch.cor, 2, function(x) {
+  perm = order(x, decreasing = T)
+  l = SZ.mask[perm]
+  mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l), 1, upper_bound = F, tol = 1e-300)
+  -log10(mhg.out$pvalue)
+})
+sort(round(arch.enrichment, 1), decreasing = T)
+# A30  A6 A26 A22 A19  A2 A29 A11 A15 A21 A16 A24  A7 A28  A1  A4 A12 A17 A27  A3  A5  A8  A9 A10 A13 A14 A18 A20 A23 A25 A31 
+# 8.0 6.0 3.2 1.8 1.7 1.6 1.6 1.1 0.8 0.7 0.6 0.5 0.3 0.3 0.2 0.1 0.1 0.1 0.1 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0
+
+
+Arch.cor = cor(subX, subArch, method = "spearman")
+arch.enrichment = apply(Arch.cor, 2, function(x) {
+  perm = order(x, decreasing = F)
+  l = SZ.mask[perm]
+  mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l), 1, upper_bound = F, tol = 1e-300)
+  -log10(mhg.out$pvalue)
+})
+sort(round(arch.enrichment, 1), decreasing = T)
+# A30  A6 A22 A19  A2 A29 A26 A11 A15 A13 A21  A4 A16  A1 A14 A12 A24 A27 A28  A5  A7  A9 A18 A20  A3  A8 A10 A17 A23 A25 A31 
+# 8.5 8.4 4.0 2.6 2.1 2.1 1.5 1.4 1.2 1.0 1.0 0.8 0.6 0.3 0.3 0.2 0.2 0.2 0.2 0.1 0.1 0.1 0.1 0.1 0.0 0.0 0.0 0.0 0.0 0.0 0.0
+
+subX.orth = orthoProject(subX, fast_row_sums(subX))
+Arch.cor = cor(subX.orth, subArch, method = "spearman")
+arch.enrichment = apply(Arch.cor, 2, function(x) {
+  perm = order(x, decreasing = F)
+  l = SZ.mask[perm]
+  mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l), 1, upper_bound = F, tol = 1e-300)
+  -log10(mhg.out$pvalue)
+})
+sort(round(arch.enrichment, 1), decreasing = T)
+
+
+
+
+
+
+
+```
+
+
+
+```{r}
+X = assays(PEC.sce.matched)$normexpr
+# arch.genes = rownames(arch.gene.spec)[which(apply(as.matrix(arch.gene.spec[, c(11, 29)]), 1, max) > 100)]
+arch.genes = rownames(arch.gene.spec)[which(apply(scale(as.matrix(arch.gene.spec[, c(7, 11, 17, 29)])), 1, max) > 3)]
+arch.genes = arch.genes[-grep("^RPL|^RPS|^MT-|^MT[:.:]", arch.genes)]
+
+
+cg = intersect(rownames(X), arch.genes)
+subArch = (arch.gene.spec[cg, c(7, 11, 17, 29)])
+subX = X[cg, ]
+# subX = log1p(subX)
+
+# X = assays(PEC.sce.matched)$normexpr
+# cg = intersect(rownames(X), rownames(arch.gene.spec))
+# subX = X[cg, ]
+
+
+# Arch.cor = -cor(subX, subArch, method = "pearson")
+# arch.enrichment = apply(Arch.cor, 2, function(x) {
+#   perm = order(x, decreasing = T)
+#   l = SZ.mask[perm]
+#   mhg.out = mhg::mhg_test(l, length(l), sum(l), 1000, 1, upper_bound = F, tol = 1e-300)
+#   -log10(mhg.out$pvalue)
+# })
+# sort(round(arch.enrichment, 1), decreasing = T)
+# 
+# 
+subX.orth = orthoProject(subX, fast_row_sums(subX))
+
+SZ.samples = list(SZ = PEC.sce.matched$individualID[which(SZ.mask == 1)])
+require(fgsea)
+
+Arch.cor = cor(subX.orth, subArch, method = "spearman")
+arch.enrichment = apply(Arch.cor, 2, function(x) {
+  gsea.out = fgsea(SZ.samples, x)
+  -log10(gsea.out$padj)
+  # perm = order(x, decreasing = T)
+  # l = SZ.mask[perm]
+  # mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l)/4, 1, upper_bound = F, tol = 1e-300)
+  # -log10(mhg.out$pvalue)
+})
+sort(round(arch.enrichment, 1), decreasing = T)
+
+```
+
+```{r}
+x = Arch.cor[, "A29"]
+fgsea::plotEnrichment(SZ.samples[[1]], x)
+
+df = data.frame(A29 = scale(Arch.cor[, "A29"]), A11 = scale(Arch.cor[, "A11"]), Phenotype = PEC.sce.matched$diagnosis, Sample = rownames(Arch.cor), x = PEC.sce.matched$ethnicity, PEC.sce.matched$ageDeath, PEC.sce.matched$sex, PEC.sce.matched$smoker)
+df$combined = (df$A29 + df$A11)/2
+
+ggscatter(df, x = "A11", y = "A29",
+          add = "reg.line",                                 # Add regression line
+          conf.int = TRUE,                                  # Add confidence interval
+          color = "Phenotype", 
+          palette = c("gray", "red"),
+          add.params = list(color = "blue",
+                            fill = "lightgray")
+          ) 
+
++
+  stat_cor(method = "pearson", label.x = 3, label.y = 30)  # Add correlation coefficient
+
+
+
+Arch.cor = cor(subX.orth, subArch, method = "spearman")
+arch.enrichment = apply(Arch.cor, 2, function(x) {
+  x = exp(df$A11)
+  names(x) = df$Sample
+  fgsea::plotEnrichment(SZ.samples[[1]], x)
+
+  # gsea.out = fgsea(SZ.samples, x)
+  # -log10(gsea.out$padj)
+  perm = order(x, decreasing = T)
+  l = SZ.mask[perm]
+  mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l)/4, 1, upper_bound = F, tol = 1e-300)
+  -log10(mhg.out$pvalue)
+})
+sort(round(arch.enrichment, 1), decreasing = T)
+
+
+
+
+# 0.9115914
+# cor(Arch.cor[, "A11"], Arch.cor[, "A29"], method = "spearman")
+
+fgsea::plotEnrichment(SZ.samples[[1]], x)
+
+
+scores = exp(Arch.cor*5)
+
+X = sapply(sort(unique(PEC.sce.matched$a)), function(x) as.numeric(PEC.sce.matched$ethnicity == x))
+rownames(X) = colnames(PEC.sce.matched)
+gender.enrichment = assess.geneset.enrichment.from.scores(scores, X)
+
+colnames(gender.enrichment$logPvals) = colnames(scores)
+
+Heatmap(gender.enrichment$logPvals)
+
+
+
+```
+
+
+
+
+```{r}
+Ind.enrichment = annotate.archetypes.using.labels(t(ACTIONet_summary$H_unified), ACTIONet_summary$metadata$Individual)
+Ind.wilcox.out = presto::wilcoxauc(t(ACTIONet_summary$H_unified), ACTIONet_summary$metadata$Individual)
+
+celltype.enrichment = annotate.archetypes.using.labels(t(ACTIONet_summary$H_unified), ACTIONet_summary$metadata$Labels)
+
+phenotype.enrichment = annotate.archetypes.using.labels(t(ACTIONet_summary$H_unified), ACTIONet_summary$metadata$Phenotype)
+
+X = t(Ind.enrichment$Enrichment)
+rownames(X) = levels(ACTIONet_summary$metadata$Individual)
+colnames(X) = paste("A", 1:ncol(X), "-", celltype.enrichment$Label, sep = "")
+
+pdf(file.path(figures.folder, "Archetype_vs_sample_enrichment.pdf"), height = 28)
+Heatmap(X, row_names_side = "left", rect_gp = gpar(col = "black"), show_row_dend = F, show_column_dend = F, column_names_gp = gpar(col = colors[celltype.enrichment$Label]))
+dev.off()
+
+
+cc = c("CON" = "gray", "SZ" = "red")
+pdf(file.path(figures.folder, "Archetype_vs_phenotype_enrichment.pdf"), height = 2)
+Heatmap(t(scale(phenotype.enrichment$Enrichment[order(phenotype.enrichment$Enrichment[, 1]), ])), row_names_side = "left", rect_gp = gpar(col = "black"), cluster_columns = F, show_row_dend = F, show_column_dend = F, column_names_gp = gpar(col = cc[phenotype.enrichment$Label[order(phenotype.enrichment$Enrichment[, 1])]]), name = "Enrichment(scaled)")
+dev.off()
+
+
+
+Heatmap(scale(X[, c(7, 11, 17, 29)]), row_names_side = "left", rect_gp = gpar(col = "black"), show_row_dend = F, show_column_dend = F) + Heatmap(pb.logcounts$Phenotype, row_names_side = "left", rect_gp = gpar(col = "black"), show_row_dend = F, show_column_dend = F, col = c("gray", "red"))
+  
+  #Heatmap(phenotype.enrichment$Enrichment, row_names_side = "left", rect_gp = gpar(col = "black"), show_row_dend = F, show_column_dend = F)
+
+
+
+  down.enrichment = assess_enrichment(ACTIONet_summary$unified_feature_specificity, ACTIONet:::.preprocess_annotation_markers(DE.new$Down.genes, rownames(pb.logcounts)))$logPvals
+
+  up.enrichment = assess_enrichment(ACTIONet_summary$unified_feature_specificity, ACTIONet:::.preprocess_annotation_markers(DE.new$Up.genes, rownames(pb.logcounts)))$logPvals
+
+  colnames(down.enrichment) = colnames(up.enrichment) = paste("A", 1:ncol(X), "-", celltype.enrichment$Label, sep = "")
+  rownames(down.enrichment) = rownames(up.enrichment) = names(DE.new$Down.genes)
+Heatmap(down.enrichment)
+
+pdf(file.path(figures.folder, "Archetype_vs_DE_up.pdf"), height = 7, width = 8)
+Heatmap(up.enrichment, row_names_side = "left", rect_gp = gpar(col = "black"), show_row_dend = F, show_column_dend = F, column_names_gp = gpar(col = colors[celltype.enrichment$Label]), row_names_gp = gpar(col = colors[rownames(up.enrichment)]), name = "Up")
+dev.off()
+
+pdf(file.path(figures.folder, "Archetype_vs_DE_down.pdf"), height = 7, width = 8)
+Heatmap(down.enrichment, row_names_side = "left", rect_gp = gpar(col = "black"), show_row_dend = F, show_column_dend = F, column_names_gp = gpar(col = colors[celltype.enrichment$Label]), row_names_gp = gpar(col = colors[rownames(down.enrichment)]), name = "Down")
+dev.off()
+
+
+
+pdf(file.path(figures.folder, "Archetype_vs_DE.pdf"), height = 7, width = 16)
+Heatmap(up.enrichment, row_names_side = "left", rect_gp = gpar(col = "black"), show_row_dend = F, show_column_dend = F, column_names_gp = gpar(col = colors[celltype.enrichment$Label]), row_names_gp = gpar(col = colors[rownames(up.enrichment)]), name = "Up") + Heatmap(down.enrichment, row_names_side = "left", rect_gp = gpar(col = "black"), show_row_dend = F, show_column_dend = F, column_names_gp = gpar(col = colors[celltype.enrichment$Label]), row_names_gp = gpar(col = colors[rownames(down.enrichment)]), name = "Down")
+dev.off()
+
+```
+

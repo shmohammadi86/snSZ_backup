@@ -1,0 +1,73 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+  CD = as.data.frame(colData(ace.filtered))
+    
+
+
+  Celltypes = factor(color.df$celltype[match(ace.filtered$Labels.final, color.df$old.celltype)], color.df$celltype)
+  Colors = colors[Celltypes]
+  
+  idx = match(ace.filtered$Individual, pb.logcounts$Internal_ID)
+  ind.meta = as.data.frame(colData(pb.logcounts))[, -c(23:36, 39:45)]
+  ind.cells = ind.meta[idx, ]
+  ind.cells$Celltype = Celltypes
+  ind.cells$Color = Colors
+  
+  S = counts(ace.filtered)
+  umis = fast_column_sums(S)
+  mt.idx = grep("MT-|MT[:.:]", rownames(ace.filtered))
+  mt.sum = fast_column_sums(S[mt.idx, ])
+  mt.perc = 100*mt.sum/umis
+  S@x = rep(1, length(S@x))
+  genes = fast_column_sums(S)
+  
+  ind.cells$umis = umis
+  ind.cells$genes = genes
+  ind.cells$mito.perc = mt.perc
+  
+  
+  ind.cells = cbind(ind.cells, CD[, c("assigned_archetype", "node_centrality")])
+  ind.cells = ind.cells[, -1]
+  
+  ind.cells = cbind(CD[, c("Id", "sizeFactors")], ind.cells)
+  ace = ace.filtered
+  rownames(ind.cells) = colnames(ace)
+
+  readr::write_rds(ind.cells, "~/results/cell_meta.rds")
+    
+  colData(ace) = DataFrame(ind.cells)
+  sce = revert_ace_as_sce(ace)  
+  se = as(sce, "SummarizedExperiment")
+  se.ace = as(se, "ACTIONetExperiment")
+  
+  readr::write_rds(se, "~/results/combinedCells.rds")
+  readr::write_rds(ace, "~/results/combinedCells_ACTIONet.rds")
+  ACE2AnnData(se.ace, "~/results/combinedCells.h5ad")
+  
+  
+
+	folder = Syn.datasets$properties$id
+	OBJ = File("~/results/datasets/ACTIONet_summary_filtered_individuals.rds", name = "Summarized fields from the ACTIONet object", parentId = folder)
+	synStore(OBJ)	
+	
+	OBJ = File("~/results/combinedCells_ACTIONet.rds", name = "Combined cells (ACTIONet)", parentId = folder)
+	synStore(OBJ)
+  
+	OBJ = File("~/results/combinedCells.rds", name = "Combined cells (SummarizedExperiment)", parentId = folder)
+	synStore(OBJ)
+
+	OBJ = File("~/results/combinedCells.h5ad", name = "Combined cells (AnnData)", parentId = folder)
+	synStore(OBJ)
+	    
+  
+  
+
+  
+  sce = revert_ace_as_sce(ace.filtered)
+
+```

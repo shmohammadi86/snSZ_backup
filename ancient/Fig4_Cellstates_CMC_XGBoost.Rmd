@@ -1,0 +1,556 @@
+---
+title: "Assess significance and relevance of cell states/archetypes"
+output: html_notebook
+---
+
+# Setup
+```{r include=FALSE}
+require(ACTIONet)
+require(stringr)
+require(ComplexHeatmap)
+
+require(muscat)
+require(edgeR)
+require(limma)
+
+dataset.path = "~/results/datasets/"
+results.path = "~/results"
+figures.folder = "~/results/figures"
+input.folder = "~/results/input"
+
+
+```
+
+
+```{r}
+param_list <- list(booster = "gbtree",
+                   objective = "binary:logistic",
+                   eval_metric = "auc")
+```
+
+
+Main archetypes to analyze are A7 (NRGN), A11 (Ex-SZ), A17 (SZTR), and A29 (In-SZ)
+
+# Show markers
+## A11 and A29 are Mt-reach but also neuro-specific
+# Plot projection of archetypes on the ACTIONet ()
+```{r}
+pb.logcounts = readr::read_rds(file.path(dataset.path, "PB_sce_final.rds"))
+
+ACTIONet_summary = readr::read_rds(file.path(dataset.path, "ACTIONet_summary_filtered_individuals.rds"))
+
+celltype.gene.spec = readr::read_rds(file.path(dataset.path, "celltype_gene_specificity.rds"))
+archetype.gene.spec = readr::read_rds(file.path(dataset.path, "archetype_gene_specificity.rds"))
+
+color.df = readRDS(file.path(dataset.path, "celltype_colors.rds"))
+
+
+
+
+colors = color.df$color
+names(colors) = color.df$celltype
+```
+
+
+# Load CMC data
+```{r}
+ace.MPP = readr::read_rds("~/results/input/MPP_bulk_expression_SZandCON.rds")
+ace.HBCC = readr::read_rds("~/results/input/HBCC_bulk_expression_SZandCON.rds")
+
+```
+
+
+```{r}
+ace.MPP = reduce.ace(ace.MPP, assay_name = "voom")
+ace.MPP = run.ACTIONet(ace.MPP, assay_name = "voom")
+
+plot.ACTIONet(ace.MPP, ace.MPP$Dx)
+
+En = annotate.archetypes.using.labels(ace.MPP, ace.MPP$Dx)
+
+Z = En$Enrichment
+Z[abs(Z) < 3] = 0
+Heatmap(Z)
+
+CC = cor(ace.MPP$unified_feature_specificity[cg, ], arch.gene.spec[cg, ], method = "spearman")
+Heatmap(CC[, c(7, 11, 17, 29)]) + Heatmap(Z)
+
+Heatmap(CC)
+
+
+
+pcs = irlba::prcomp_irlba(t(assays(ace.MPP)$voom))
+
+plot.ACTIONet(pcs$x, ace.MPP$Dx)
+
+
+```
+
+
+
+```{r}
+arch.gene.spec = ACTIONet_summary$unified_feature_specificity
+
+arch.genes = rownames(arch.gene.spec) #[which(apply(scale(as.matrix(arch.gene.spec[, c(7, 11, 17, 29)])), 1, max) > 1)]
+#arch.genes = arch.genes [-grep("^RPL|^RPS|^MT-|^MT[:.:]", arch.genes)]
+
+cg = intersect(rownames(ace.MPP), arch.genes)
+subArch = (arch.gene.spec[cg, ])
+
+
+```
+
+```{r}
+train.set = sample(1:ncol(ace.MPP), round(2*ncol(ace.MPP)/3))
+test.set = setdiff(1:ncol(ace.MPP), train.set)
+
+
+
+```
+
+```{r}
+archs = c(29)
+
+S = as.matrix(scale(subArch))
+
+```
+
+# Project on archetypes (training)
+```{r}
+  subBulk = assays(ace.MPP)$voom[cg, train.set]
+
+  A = subBulk #scale(subBulk)
+  A.ortho = orthoProject(A, fast_row_sums(A))
+  
+  # A_r = S %*% MASS::ginv(t(S) %*% S) %*% (t(S) %*% A.ortho)
+  # training_features = Matrix::t(A_r)
+  #   
+    
+  # A.scaled = scale(apply(A, 2, function(x) x * S[, 29]))
+  # training_features = Matrix::t(A.scaled)
+
+  perm = order(S[, 29], decreasing = T)
+  # 
+  # training_features = sapply(seq(100, 2000, by = 100), function(i) cor(A.ortho[perm[1:i], ], S[perm[1:i], 29]))
+  # 
+  # training_features = t(A.ortho)
+  
+  training_features = cor(A.ortho, S[, archs], method = "pearson")
+
+  training_labels = as.numeric(ace.MPP$Dx[train.set] == "SCZ")
+  
+```
+
+# Train
+```{r}
+    system.time( {model <- xgboost::xgboost(data = training_features,
+                    label = training_labels,
+                    params = param_list, nrounds = 1000, early_stopping_rounds = 10, max_depth = 10,
+                    verbose = FALSE, nthread = parallel::detectCores() - 2) } )
+```
+
+
+
+# Project on archetypes (test)
+```{r}
+    subBulk = assays(ace.MPP)$voom[cg, test.set]
+
+  A = subBulk #scale(subBulk)
+  A.ortho = orthoProject(A, fast_row_sums(A))
+  
+  # A_r = S %*% MASS::ginv(t(S) %*% S) %*% (t(S) %*% A.ortho)
+  # testing_features = Matrix::t(A_r)
+  #   
+    
+  # A.scaled = scale(apply(A, 2, function(x) x * S[, 29]))
+  # testing_features = Matrix::t(A.scaled)
+
+  # perm = order(S[, 29], decreasing = T)
+  # 
+  # testing_features = sapply(seq(100, 2000, by = 100), function(i) cor(A.ortho[perm[1:i], ], S[perm[1:i], 29]))
+  # 
+  # testing_features = t(A.ortho)
+  testing_features = cor(A.ortho, S[, archs], method = "pearson")
+
+  testing_labels = as.numeric(ace.MPP$Dx[test.set] == "SCZ")
+  
+```
+
+
+```{r}
+    xgbpred <- predict(model, testing_features)
+
+    # cor(xgbpred, pstel.data.labels.NASH.filtered[mask])
+
+    perf.out = PRROC::roc.curve(xgbpred, weights.class0 = testing_labels, curve = T)
+    print(perf.out)
+    
+    
+```
+
+
+
+```{r}
+param <- list(objective = "multi:softprob",
+      eval_metric = "mlogloss",
+      num_class = 12,
+      max_depth = 8,
+      eta = 0.05,
+      gamma = 0.01, 
+      subsample = 0.9,
+      colsample_bytree = 0.8, 
+      min_child_weight = 4,
+      max_delta_step = 1
+      )
+cv.nround = 1000
+cv.nfold = 5
+mdcv <- xgb.cv(data=dtrain, params = param, nthread=6, 
+                nfold=cv.nfold, nrounds=cv.nround,
+                verbose = T)
+
+
+```
+
+
+```{r}
+arch.genes = rownames(arch.gene.spec) # [which(apply(scale(as.matrix(arch.gene.spec[, c(7, 11, 17, 29)])), 1, max) > 3)]
+
+
+Z = scale(subArch)
+markers.genes = as.list(as.data.frame(apply(Z, 2, function(z) rownames(Z)[order(z, decreasing = T)[1:500]])))
+
+
+subBulk.orth = orthoProject(subBulk, fast_row_sums(subBulk))
+X = -subBulk.orth
+X[X < 0] = 0
+
+En = annotate.profile.using.markers(t(X), markers.genes)
+Heatmap(En$Enrichment)
+
+```
+
+
+
+```{r}
+
+
+subBulk.orth = orthoProject(subBulk, fast_row_sums(subBulk))
+
+SZ.samples = list(SZ = ace.bulk$SampleID[which(ace.bulk$Dx == "SCZ")])
+require(fgsea)
+
+Arch.cor = -cor(subBulk.orth, subArch, method = "pearson")
+arch.enrichment = -log10(p.adjust(apply(Arch.cor, 2, function(x) {
+  gsea.out = fgsea(SZ.samples, x)
+  gsea.out$padj
+  # perm = order(x, decreasing = T)
+  # l = SZ.mask[perm]
+  # mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l)/4, 1, upper_bound = F, tol = 1e-300)
+  # mhg.out$pvalue
+}), "fdr"))
+
+sort(round(arch.enrichment, 1), decreasing = T)
+
+
+# cor(Arch.cor[, "A11"], Arch.cor[, "A29"], method = "spearman")
+# 
+# x = -(Arch.cor[, "A11"] + Arch.cor[, "A29"]) / 2
+# gsea.out = fgsea(SZ.samples, x)
+# plotEnrichment(SZ.samples$SZ, x)
+# print(gsea.out)
+
+
+# 
+# 
+# 
+# x = Arch.cor[, "A29"]
+# fgsea::plotEnrichment(SZ.samples[[1]], x)
+# 
+# df = data.frame(A29 = scale(Arch.cor[, "A29"]), A11 = scale(Arch.cor[, "A11"]), Phenotype = PEC.sce.matched$diagnosis, Sample = rownames(Arch.cor), x = PEC.sce.matched$ethnicity, PEC.sce.matched$ageDeath, PEC.sce.matched$sex, PEC.sce.matched$smoker)
+# df$combined = (df$A29 + df$A11)/2
+# 
+# ggscatter(df, x = "A11", y = "A29",
+#           add = "reg.line",                                 # Add regression line
+#           conf.int = TRUE,                                  # Add confidence interval
+#           color = "Phenotype", 
+#           palette = c("gray", "red"),
+#           add.params = list(color = "blue",
+#                             fill = "lightgray")
+#           ) 
+# 
+# +
+#   stat_cor(method = "pearson", label.x = 3, label.y = 30)  # Add correlation coefficient
+# 
+# 
+
+
+
+
+```
+
+
+```{r}
+sample.meta = as.data.frame(colData(pb.logcounts))
+sample.meta$scores = scale(sample.meta$A11.signature) + scale(sample.meta$A29.signature)
+
+En = annotate.archetypes.using.labels(t(ACTIONet_summary$H_unified), ACTIONet_summary$metadata$Phenotype)
+Heatmap(En$Enrichment)
+
+
+
+Heatmap(sample.meta$Phenotype[order(sample.meta$scores, decreasing = T)], cluster_rows = F)
+
+```
+
+```{r}
+
+arch.sig.avg = as.matrix(sample.meta[, 33:36])
+med.mat = as.matrix(sample.meta[, 17:22])
+
+Arch.vs.Med.enrichment = apply(arch.sig.avg, 2, function(sig) {
+  perm = order(sig, decreasing = T)
+  X = med.mat[perm, ]
+  logPvals = apply(X, 2, function(x) {
+    l = as.numeric(x != 0)
+    mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l), 1, upper_bound = F, tol = 1e-100)
+    -log10(mhg.out$pvalue)
+  })
+  return(logPvals)
+})
+Heatmap(Arch.vs.Med.enrichment)
+
+(apply(arch.sig.avg, 2, function(x) cor(x, sample.meta$Age, method = "spearman")))
+
+apply(arch.sig.avg, 2, function(x) cor.test(x, as.numeric(factor(sample.meta$Phenotype)), method = "spearman", use = "complete.obs")$p.value)
+
+
+```
+
+
+# Load PEC data
+```{r}
+PEC.expr.table = read.table(file.path(input.folder, "DER-01_PEC_Gene_expression_matrix_normalized.txt"), header = T)
+rownames(PEC.expr.table) = PEC.expr.table$gene_id
+
+PEC.expr.mat = as.matrix(PEC.expr.table[, -1])
+
+
+library(org.Hs.eg.db)
+gg = as.character(sapply(PEC.expr.table$gene_id, function(str) str_split(str, fixed("."))[[1]][[1]]))
+suppressWarnings(ids <- AnnotationDbi::mapIds(org.Hs.eg.db, keys = gg, keytype = "ENSEMBL", column = "SYMBOL", multiVals = "first"))
+mask = !is.na(ids)
+
+PEC.expr.mat = PEC.expr.mat[mask, ]
+rownames(PEC.expr.mat) = ids[mask]
+
+
+
+
+PEC.expr.table.TPM = read.table(file.path(input.folder, "DER-02_PEC_Gene_expression_matrix_TPM.txt"), header = T)
+rownames(PEC.expr.table.TPM) = PEC.expr.table.TPM$GeneName
+
+PEC.expr.mat.TPM = as.matrix(PEC.expr.table.TPM[, -1])
+
+
+library(org.Hs.eg.db)
+mask = !is.na(ids)
+suppressWarnings(ids <- AnnotationDbi::mapIds(org.Hs.eg.db, keys = PEC.expr.table.TPM$GeneName, keytype = "ENSEMBL", column = "SYMBOL", multiVals = "first"))
+
+PEC.expr.mat.TPM = PEC.expr.mat.TPM[mask, ]
+rownames(PEC.expr.mat.TPM) = ids[mask]
+
+
+
+
+
+gg = sort(unique(intersect(rownames(PEC.expr.mat.TPM), rownames(PEC.expr.mat))))
+cc = sort(unique(intersect(colnames(PEC.expr.mat), colnames(PEC.expr.mat.TPM))))
+
+PEC.sce = SingleCellExperiment(assays = list(normexpr = PEC.expr.mat[gg, cc], TPM = PEC.expr.mat.TPM[gg, cc]))
+
+
+meta.PEC.full = read.table("~/results/input/Job-138522884223735377851224577.tsv", header = T, sep = "\t")
+
+
+meta.PEC = read.table("~/results/input/Job-138522891409304015015695443.tsv", header = T, sep = "\t")
+mask = meta.PEC$diagnosis %in% c("Control", "Schizophrenia")
+meta.PEC = meta.PEC[mask, ]
+
+common.samples = sort(unique(intersect((meta.PEC$individualID), (cc))))
+
+meta.PEC.matched = meta.PEC[match(common.samples, meta.PEC$individualID), ]
+PEC.sce.matched = PEC.sce[, match(common.samples, colnames(PEC.sce))]
+colData(PEC.sce.matched) = DataFrame(meta.PEC.matched)
+colnames(PEC.sce.matched) = PEC.sce.matched$individualID
+
+readr::write_rds(PEC.sce.matched, "~/results/input/PEC_bulk_expression_SZandCON.rds")
+
+```
+
+
+# A11 and A19 specific
+```{r}
+# 0   1 
+# 452 367
+SZ.mask = as.numeric(PEC.sce.matched$diagnosis == "Schizophrenia")
+
+
+X = assays(PEC.sce.matched)$normexpr
+arch.gene.spec = ACTIONet_summary$unified_feature_specificity
+
+cg = intersect(rownames(X), rownames(arch.gene.spec))
+subX = X[cg, ]
+subArch = arch.gene.spec[cg, ]
+
+Arch.cor = cor(subX, subArch)
+
+arch.enrichment = apply(Arch.cor, 2, function(x) {
+  perm = order(x, decreasing = T)
+  l = SZ.mask[perm]
+  mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l), 1, upper_bound = F, tol = 1e-300)
+  -log10(mhg.out$pvalue)
+})
+sort(round(arch.enrichment, 1), decreasing = T)
+# A30  A6 A26 A22 A19  A2 A29 A11 A15 A21 A16 A24  A7 A28  A1  A4 A12 A17 A27  A3  A5  A8  A9 A10 A13 A14 A18 A20 A23 A25 A31 
+# 8.0 6.0 3.2 1.8 1.7 1.6 1.6 1.1 0.8 0.7 0.6 0.5 0.3 0.3 0.2 0.1 0.1 0.1 0.1 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0
+
+
+Arch.cor = cor(subX, subArch, method = "spearman")
+arch.enrichment = apply(Arch.cor, 2, function(x) {
+  perm = order(x, decreasing = F)
+  l = SZ.mask[perm]
+  mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l), 1, upper_bound = F, tol = 1e-300)
+  -log10(mhg.out$pvalue)
+})
+sort(round(arch.enrichment, 1), decreasing = T)
+# A30  A6 A22 A19  A2 A29 A26 A11 A15 A13 A21  A4 A16  A1 A14 A12 A24 A27 A28  A5  A7  A9 A18 A20  A3  A8 A10 A17 A23 A25 A31 
+# 8.5 8.4 4.0 2.6 2.1 2.1 1.5 1.4 1.2 1.0 1.0 0.8 0.6 0.3 0.3 0.2 0.2 0.2 0.2 0.1 0.1 0.1 0.1 0.1 0.0 0.0 0.0 0.0 0.0 0.0 0.0
+
+subX.orth = orthoProject(subX, fast_row_sums(subX))
+Arch.cor = cor(subX.orth, subArch, method = "spearman")
+arch.enrichment = apply(Arch.cor, 2, function(x) {
+  perm = order(x, decreasing = F)
+  l = SZ.mask[perm]
+  mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l), 1, upper_bound = F, tol = 1e-300)
+  -log10(mhg.out$pvalue)
+})
+sort(round(arch.enrichment, 1), decreasing = T)
+
+
+
+
+
+
+
+```
+
+
+
+```{r}
+X = assays(PEC.sce.matched)$normexpr
+# arch.genes = rownames(arch.gene.spec)[which(apply(as.matrix(arch.gene.spec[, c(11, 29)]), 1, max) > 100)]
+arch.genes = rownames(arch.gene.spec)[which(apply(scale(as.matrix(arch.gene.spec[, c(7, 11, 17, 29)])), 1, max) > 3)]
+arch.genes = arch.genes[-grep("^RPL|^RPS|^MT-|^MT[:.:]", arch.genes)]
+
+
+cg = intersect(rownames(X), arch.genes)
+subArch = (arch.gene.spec[cg, c(7, 11, 17, 29)])
+subX = X[cg, ]
+# subX = log1p(subX)
+
+# X = assays(PEC.sce.matched)$normexpr
+# cg = intersect(rownames(X), rownames(arch.gene.spec))
+# subX = X[cg, ]
+
+
+# Arch.cor = -cor(subX, subArch, method = "pearson")
+# arch.enrichment = apply(Arch.cor, 2, function(x) {
+#   perm = order(x, decreasing = T)
+#   l = SZ.mask[perm]
+#   mhg.out = mhg::mhg_test(l, length(l), sum(l), 1000, 1, upper_bound = F, tol = 1e-300)
+#   -log10(mhg.out$pvalue)
+# })
+# sort(round(arch.enrichment, 1), decreasing = T)
+# 
+# 
+subX.orth = orthoProject(subX, fast_row_sums(subX))
+
+SZ.samples = list(SZ = PEC.sce.matched$individualID[which(SZ.mask == 1)])
+require(fgsea)
+
+Arch.cor = cor(subX.orth, subArch, method = "spearman")
+arch.enrichment = apply(Arch.cor, 2, function(x) {
+  gsea.out = fgsea(SZ.samples, x)
+  -log10(gsea.out$padj)
+  # perm = order(x, decreasing = T)
+  # l = SZ.mask[perm]
+  # mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l)/4, 1, upper_bound = F, tol = 1e-300)
+  # -log10(mhg.out$pvalue)
+})
+sort(round(arch.enrichment, 1), decreasing = T)
+
+```
+
+```{r}
+x = Arch.cor[, "A29"]
+fgsea::plotEnrichment(SZ.samples[[1]], x)
+
+df = data.frame(A29 = scale(Arch.cor[, "A29"]), A11 = scale(Arch.cor[, "A11"]), Phenotype = PEC.sce.matched$diagnosis, Sample = rownames(Arch.cor), x = PEC.sce.matched$ethnicity, PEC.sce.matched$ageDeath, PEC.sce.matched$sex, PEC.sce.matched$smoker)
+df$combined = (df$A29 + df$A11)/2
+
+ggscatter(df, x = "A11", y = "A29",
+          add = "reg.line",                                 # Add regression line
+          conf.int = TRUE,                                  # Add confidence interval
+          color = "Phenotype", 
+          palette = c("gray", "red"),
+          add.params = list(color = "blue",
+                            fill = "lightgray")
+          ) 
+
++
+  stat_cor(method = "pearson", label.x = 3, label.y = 30)  # Add correlation coefficient
+
+
+
+Arch.cor = cor(subX.orth, subArch, method = "spearman")
+arch.enrichment = apply(Arch.cor, 2, function(x) {
+  x = exp(df$A11)
+  names(x) = df$Sample
+  fgsea::plotEnrichment(SZ.samples[[1]], x)
+
+  # gsea.out = fgsea(SZ.samples, x)
+  # -log10(gsea.out$padj)
+  perm = order(x, decreasing = T)
+  l = SZ.mask[perm]
+  mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l)/4, 1, upper_bound = F, tol = 1e-300)
+  -log10(mhg.out$pvalue)
+})
+sort(round(arch.enrichment, 1), decreasing = T)
+
+
+
+
+# 0.9115914
+# cor(Arch.cor[, "A11"], Arch.cor[, "A29"], method = "spearman")
+
+fgsea::plotEnrichment(SZ.samples[[1]], x)
+
+
+scores = exp(Arch.cor*5)
+
+X = sapply(sort(unique(PEC.sce.matched$a)), function(x) as.numeric(PEC.sce.matched$ethnicity == x))
+rownames(X) = colnames(PEC.sce.matched)
+gender.enrichment = assess.geneset.enrichment.from.scores(scores, X)
+
+colnames(gender.enrichment$logPvals) = colnames(scores)
+
+Heatmap(gender.enrichment$logPvals)
+
+
+
+```
+
+
+
+
+

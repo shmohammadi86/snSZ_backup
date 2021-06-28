@@ -1,0 +1,185 @@
+---
+title: "Fig3: H-MAGMA analysis"
+output: html_notebook
+---
+
+# Setup
+```{r include=FALSE}
+library(org.Hs.eg.db)
+
+dataset.path = "~/results/datasets/"
+results.path = "~/results"
+figures.folder = "~/results/figures"
+
+MAGMA.path = "~/magma"
+
+
+```
+
+# Load DE genes
+```{r include=FALSE}
+DE.new = readRDS(file.path(dataset.path, "DE_genes_pseudobulk_final_with_umi.rds"))
+
+Up.genes = DE.new$Up.genes
+Down.genes = DE.new$Down.genes
+
+color.df = readRDS(file.path(dataset.path, "celltype_colors.rds"))
+
+colors = color.df$color
+names(colors) = color.df$celltype
+
+```
+
+
+
+```{r}
+# Up.genes = sapply(resDE$McLean$table$PhenotypeSZ, function(df) {
+#   mask = (df$p_val < 0.05) & (df$logFC > 0.1)
+#   df$gene[mask]
+# })
+# Down.genes = sapply(resDE$McLean$table$PhenotypeSZ, function(df) {
+#   mask = (df$p_val < 0.05) & (df$logFC < -0.1)
+#   df$gene[mask]
+# })
+
+
+
+
+
+```
+
+
+
+# Convert DE genes to ENSG and export
+```{r}
+require(org.Hs.eg.db)
+
+suppressWarnings(ids <- AnnotationDbi::mapIds(org.Hs.eg.db, keys = row.names(DE.new$DE.sc), keytype = "SYMBOL", column = "ENSEMBL", multiVals = "first"))
+ids[is.na(ids)] = ""
+
+Up.genes.ENSG = sapply(Up.genes, function(gs) {
+  setdiff(sort(unique(ids[match(gs, rownames(pb.logcounts))])), "")
+})
+Up.genes.ENSG.df = reshape2::melt(Up.genes.ENSG)
+Up.genes.ENSG.df = Up.genes.ENSG.df[, c(2, 1)]
+Up.genes.ENSG.df$L1 = factor(Up.genes.ENSG.df$L1, names(Up.genes))
+Up.genes.ENSG.df = Up.genes.ENSG.df[order(Up.genes.ENSG.df$L1), ]
+write.table(Up.genes.ENSG.df, file.path(MAGMA.path, "genesets", "Up_genes_ENSG.tsv"), sep = "\t", col.names = F, row.names = F, quote = F)
+
+Down.genes.ENSG = sapply(Down.genes, function(gs) {
+  setdiff(sort(unique(ids[match(gs, rownames(pb.logcounts))])), "")
+})
+Down.genes.ENSG.df = reshape2::melt(Down.genes.ENSG)
+Down.genes.ENSG.df = Down.genes.ENSG.df[, c(2, 1)]
+Down.genes.ENSG.df$L1 = factor(Down.genes.ENSG.df$L1, names(Down.genes))
+Down.genes.ENSG.df = Down.genes.ENSG.df[order(Down.genes.ENSG.df$L1), ]
+
+write.table(Down.genes.ENSG.df, file.path(MAGMA.path, "genesets", "Down_genes_ENSG.tsv"), sep = "\t", col.names = F, row.names = F, quote = F)
+
+
+UpAndDown.genes.ENSG.df = rbind(Up.genes.ENSG.df, Down.genes.ENSG.df)
+UpAndDown.genes.ENSG.df$L1 = factor(UpAndDown.genes.ENSG.df$L1, names(Up.genes))
+UpAndDown.genes.ENSG.df = UpAndDown.genes.ENSG.df[order(UpAndDown.genes.ENSG.df$L1), ]
+
+write.table(UpAndDown.genes.ENSG.df, file.path(MAGMA.path, "genesets", "UpAndDown_genes_ENSG.tsv"), sep = "\t", col.names = F, row.names = F, quote = F)
+
+
+```
+
+
+
+
+
+# Run H-MAGMA
+We run HMAGMA using  **for f in `ls hmagma/`; do (./magma --gene-results ./hmagma/$f/$f.genes.raw --set-annot genesets/UpAndDown_genes_ENSG.tsv col=2,1 --out $f\_UpAndDown &); done`**, from inside the magma folder, where hmagma are prestored the gene models scores.
+
+# Load H-MAGMA results
+
+```{r}
+dl = list.dirs(file.path(MAGMA.path, "psych_arch/"), full.names = F, recursive = F)
+
+HMAGMA.Pvals = vector("list", 1)
+names(HMAGMA.Pvals) = c("UpAndDown")
+for (d in names(HMAGMA.Pvals)) {
+  HMAGMA.Pvals[[d]] = matrix(1, nrow = 20, ncol = length(dl))
+  colnames(HMAGMA.Pvals[[d]]) = dl
+  rownames(HMAGMA.Pvals[[d]]) = names(Up.genes)
+  for(cond in dl) {
+    print(cond)
+    file.name = sprintf("%s/out/%s_%s.gsa.out", MAGMA.path, cond, d)
+    lines = readLines(con <- file(file.name))
+    lines = str_split(lines, "\n")[-c(1:5)]
+    
+    pvals = sapply(lines, function(ll) {
+      parts = str_split(ll, " ")
+      as.numeric(parts[[1]][length(parts[[1]])])
+    })
+    
+    names(pvals) = sapply(lines, function(ll) {
+      parts = str_split(ll, " ")
+      parts[[1]][[1]]
+    })
+
+    HMAGMA.Pvals[[d]][names(pvals), cond] = pvals 
+  }
+}
+
+
+# readr::write_rds(HMAGMA.Pvals, file.path(results.path, "HMAGMA_results_raw.rds"))
+
+
+```
+
+# Or load preprocessed results
+```{r}
+HMAGMA.Pvals = readr::read_rds(file.path(results.path, "HMAGMA_results_raw.rds"))
+
+```
+
+
+
+## Export selected results
+```{r}
+# selected.traits = c("hmagmaAdultBrain__sz3", "hmagmaAdultBrain__bip2", "hmagmaAdultBrain__mdd_without_23andMe", "hmagmaAdultBrain__alz2noapoe")
+# 
+# trait.labels = c("Schizophrenia (SZ)", "Bipolar (BP)", "Depression (MDD)", "Alzheimer (AD)")
+
+  selected.traits = c("hmagmaAdultBrain__sz3", "hmagmaAdultBrain__bip2", "hmagmaAdultBrain__asd", "hmagmaAdultBrain__adhd", "hmagmaAdultBrain__mdd_without_23andMe", "hmagmaAdultBrain__alz2noapoe")
+
+trait.labels = c("Schizophrenia (SZ)", "Bipolar (BP)","Autism (ASD)", "ADHD", "Depression (MDD)", "Alzheimer (AD)")
+
+#   selected.traits = c("hmagmaAdultBrain__sz3", "hmagmaAdultBrain__bip2", "hmagmaAdultBrain__adhd", "hmagmaAdultBrain__alz2noapoe")
+# 
+# trait.labels = c("Schizophrenia (SZ)", "Bipolar (BP)","ADHD", "Alzheimer (AD)")
+
+# X = -log10(HMAGMA.Pvals$UpAndDown)
+# Heatmap(X)
+
+
+X = HMAGMA.Pvals$UpAndDown[, selected.traits]
+cts = intersect(color.df$celltype, rownames(X))
+cts = cts[grep("^In|^Ex", cts)]
+# 
+# X = X[, grep("Adult", colnames(X))]
+X = X[cts, ]
+# X = matrix(p.adjust(as.numeric(X), "fdr"), nrow = length(cts))
+X = apply(X, 2, function(p) p.adjust(p, "fdr"))
+rownames(X) = intersect(names(colors), rownames(X))
+X = -log10(X)
+# X[X < -log10(0.05)] = 0
+colnames(X) = trait.labels
+rownames(X) = cts
+
+PurPal = colorRampPalette(RColorBrewer::brewer.pal(9, "Purples"))(200)
+PurPal = c(rep(PurPal[1], length(PurPal)*(sum(X < 1) / length(X))), PurPal)
+
+require(corrplot)
+pdf(file.path(figures.folder, "HMAGMA_adultBrain_UpAndDown_corrplot_logumi_baseline_full_filter_extended_cell_filtering_localFDR_neuro.pdf"), width =7, height = 7)
+corrplot(X, is.corr = F, method = "pie", col = PurPal, cl.lim = c(0, 5), cl.length = 5, outline = T, sig.level = 0.05, p.mat = 10^(-X), insig = "blank", tl.col = "black")
+dev.off()
+
+
+```
+
+
+

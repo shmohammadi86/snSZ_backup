@@ -1,0 +1,771 @@
+---
+title: "Fig3: H-MAGMA analysis"
+output: html_notebook
+---
+# Setup
+```{r include=FALSE}
+# library(org.Hs.eg.db)
+require(ACTIONet)
+require(stringr)
+require(ComplexHeatmap)
+
+
+results.path = "~/results"
+input.path = "~/results/input"
+dataset.path = "~/results/datasets"
+tables.path = "~/results/tables"
+figures.path = "~/results/figures"
+
+
+```
+
+# Load primary datasets
+```{r, eval = T}
+ACTIONet_summary = readr::read_rds(file.path(dataset.path, "ACTIONet_summary_filtered_individuals.rds"))
+pb.logcounts = readr::read_rds(file.path(dataset.path, "PB_mean_logcounts_final.RDS"))
+
+color.df = readRDS(file.path(dataset.path, "celltype_colors.rds"))
+colors = color.df$color
+names(colors) = color.df$celltype
+
+```
+
+
+# Load DE results
+```{r, eval = T}
+resDE = readr::read_rds(file.path(dataset.path, "Cohort_specific_DE_results.rds"))
+filtered.tables = readr::read_rds(file.path(dataset.path, "Cohort_specific_DE_results_filtered.rds"))
+combined.analysis.tables = readr::read_rds(file.path(dataset.path, "meta_analysis_results.rds"))
+
+DE.new = readRDS(file.path(dataset.path, "DE_genes_pseudobulk.rds"))
+Up.genes = DE.new$Up.genes
+Down.genes = DE.new$Down.genes
+DE.sc = DE.new$DE.sc
+
+```
+
+
+
+# Load bulk expression
+```{r}
+bulk = readr::read_rds("~/results/input/MPP_bulk_expression_SZandCON.rds")
+bulk.profile = assays(bulk)$voom
+bulk.profile.orth = orthoProject(bulk.profile, Matrix::rowMeans(bulk.profile))
+
+```
+
+
+```{r}
+mask = pb.logcounts$POP.EL3SD == "EUR"
+table(pb.logcounts$Cohort[mask])
+
+
+cor.test(pb.logcounts$TPS.All[mask], pb.logcounts$PRS[mask], method = "pearson")
+
+
+cor.test(pb.logcounts$A29.signature[mask], pb.logcounts$TPS.All[mask], method = "pearson")
+
+
+```
+```{r}
+data()
+
+```
+
+
+
+```{r}
+arch.annot = annotate.archetypes.using.labels(t(ACTIONet_summary$H_unified), ACTIONet_summary$metadata$Labels)
+
+arch.labels = paste("A", 1:ncol(ACTIONet_summary$H_unified), "-", arch.annot$Label, sep = "")
+arch.labels[c(7, 11, 17, 29)] = paste("A", c(7, 11, 17, 29), "-", c("Ex-NRGN", "Ex-SZ", "Ex-SZTR", "In-SZ"), sep = "")
+
+arch.order = c(setdiff(order(match(arch.annot$Label, names(colors))), c(11, 17, 29)), c(11, 17, 29))
+
+```
+
+```{r}
+celltype.spec = readRDS("~/results/datasets/celltype_gene_specificity.rds")
+
+common.genes = intersect(rownames(celltype.spec), rownames(bulk.profile.orth))
+
+cc.celltypes = cor(bulk.profile.orth[common.genes, ], celltype.spec[common.genes, ])
+rownames(cc.celltypes) = bulk$SampleID
+
+df = as.data.frame(cc.celltypes)
+df$Phenotype = bulk$Dx
+df$ID = bulk$SampleID
+saveRDS(df, file.path(dataset.path, "celltypes_vs_bulk_cor.rds"))
+
+
+
+
+sample.sets = split(bulk$SampleID, bulk$Dx)
+pvals.celltypes=apply(cc.celltypes, 2, function(x) {
+  gsea.out = fgsea(sample.sets, x, eps = 0)
+  return(gsea.out$pval)
+})
+# pvals.corrected = -log10(p.adjust(pvals, "fdr"))
+# Enrichment = t(matrix(pvals.corrected, nrow = 2))
+Enrichment = t(-log10(apply(pvals.celltypes, 2, function(p) p.adjust(p, "fdr"))))
+colnames(Enrichment) = names(sample.sets)
+Enrichment[Enrichment < -log10(0.05)] = 0
+
+Heatmap(Enrichment)
+
+```
+
+```{r}
+arch.spec = readRDS("~/results/datasets/archetype_gene_specificity.rds")
+
+
+common.genes = intersect(rownames(arch.spec), rownames(bulk.profile.orth))
+
+cc = cor(bulk.profile.orth[common.genes, ], arch.spec[common.genes, ])
+rownames(cc) = bulk$SampleID
+
+sample.sets = split(bulk$SampleID, bulk$Dx)
+pvals=apply(cc, 2, function(x) {
+  gsea.out = fgsea(sample.sets, x, eps = 0)
+  return(gsea.out$pval)
+})
+# pvals.corrected = -log10(p.adjust(pvals, "fdr"))
+# Enrichment = t(matrix(pvals.corrected, nrow = 2))
+Enrichment = t(-log10(apply(pvals, 2, function(p) p.adjust(p, "fdr"))))
+rownames(Enrichment) = arch.labels
+colnames(Enrichment) = names(sample.sets)
+Enrichment[Enrichment < -log10(0.05)] = 0
+
+df = as.data.frame(cc[, arch.order])
+colnames(df) = arch.labels[arch.order]
+df$Phenotype = bulk$Dx
+df$ID = bulk$SampleID
+saveRDS(df, file.path(dataset.path, "cellstates_vs_bulk_cor.rds"))
+
+
+# PurPal = colorRampPalette(RColorBrewer::brewer.pal(11, "Purples"))(200)
+
+pdf(file.path(figures.path, "Archs_vs_bulk_fgsea_states.pdf"), width = 3.5, height = 2)
+Heatmap(Enrichment[arch.order[c(1, 29:31)], ], cluster_rows = F, cluster_columns = F, rect_gp = gpar(col = "black"), row_names_side = "left", row_names_gp = gpar(col = colors[arch.annot$Label[arch.order]]), name = "Enrichment", col = PurPal)
+dev.off()
+
+
+```
+
+
+
+```{r}
+require(openxlsx)
+
+PEC_modules = readLines(con <- file("~/PEC_modules/INT-09_WGCNA_modules_hgnc_ids.csv"))
+
+
+mod.names = lapply(PEC_modules, function(x) str_split(x, "\t")[[1]][1])
+PEC_modules.genes = lapply(PEC_modules, function(x) sort(unique(str_split(x, "\t")[[1]][-1])))
+names(PEC_modules.genes) = mod.names
+
+SZ.mods = c("module_3628", "module_3636", "module_3711", "module_3251", "module_1749", "module_2752", "module_3001", "module_3009", "module_3172", "module_3332", "module_3333", "module_3464", "module_3614", "module_725", "module_738", "module_1685", "module_1755", "module_2692", "module_3107", "module_3184", "module_3316", "module_3349", "module_3381", "module_3496", "module_3543", "module_3616", "module_3673", "module_3678", "module_3693", "module_3709", "module_3731")
+PEC_modules.genes.SZ = PEC_modules.genes[SZ.mods]
+
+
+arch.spec = ACTIONet_summary$unified_feature_specificity
+associations = do.call(cbind, lapply(PEC_modules.genes, function(mod) as.numeric(rownames(arch.spec) %in% mod)))
+colnames(associations) = mod.names
+rownames(associations) = rownames(arch.spec)
+PEC.mod.en = assess.geneset.enrichment.from.scores(arch.spec, associations)
+PEC.mod.logPvals = PEC.mod.en$logPvals
+colnames(PEC.mod.logPvals) = colnames(arch.spec)
+rownames(PEC.mod.logPvals) = mod.names
+  
+# plot.top.k.features(PEC.mod.logPvals)
+
+
+
+pdf(file.path(figures.path, "Archs_vs_PEC_SZ_modules_cellstates.pdf"), width = 10, height = 2)
+Heatmap(X[29:31, ], cluster_rows = F, cluster_columns = F, rect_gp = gpar(col = "black"), row_names_side = "left", row_names_gp = gpar(col = colors[arch.annot$Label[arch.order[29:31]]]), name = "Enrichment", col = blues9)
+dev.off()
+
+
+```
+```{r}
+Mod.vs.DE.up = assess.genesets(Up.genes, PEC_modules.genes[SZ.mods], nrow(pb.logcounts), correct = "local")
+Mod.vs.DE.down = assess.genesets(Down.genes, PEC_modules.genes[SZ.mods], nrow(pb.logcounts), correct = "local")
+
+
+# Mod.vs.DE.up[Mod.vs.DE.up < -log10(0.05)] = 0
+# Y = Mod.vs.DE.up
+# Rd.pal = circlize::colorRamp2(seq(0, quantile(Y, 0.99), length.out = 8), c("#ffffff", pals::brewer.reds(7)))
+
+Mod.vs.DE.down[Mod.vs.DE.down < -log10(0.05)] = 0
+X = Mod.vs.DE.down
+Bu.pal = circlize::colorRamp2(seq(0, quantile(X, 0.99), length.out = 8), c("#ffffff", pals::brewer.blues(7)))
+
+
+
+pdf(file.path(figures.path, "DE_Down_vs_PEC_SZ_modules.pdf"), width = 9)
+Heatmap(X, cluster_rows = F, rect_gp = gpar(col = "black"), name = "Down", row_names_side = "left", row_names_gp = gpar(col = colors), col = Bu.pal)
+dev.off()
+
+
+
+
+```
+
+
+
+## Celltype enrichment 
+```{r}
+Labels = as.character(ACTIONet_summary$metadata$Labels)
+
+Labels[grep("^In", Labels)] = "In"
+Labels[grep("^Ex", Labels)] = "Ex"
+Labels[!grepl("^Ex|^In", Labels)] = "Glial"
+
+# Arch.vs.celltype.df = data.frame(A7 = ACTIONet_summary$H_unified[, 7], A11 = ACTIONet_summary$H_unified[, 11], A17 = ACTIONet_summary$H_unified[, 17], A29 = ACTIONet_summary$H_unified[, 29], Celltype = Labels)
+# 
+Arch.vs.celltype.df = data.frame(A11 = ACTIONet_summary$H_unified[, 11], A29 = ACTIONet_summary$H_unified[, 29], Celltype = Labels)
+
+Arch.vs.celltype.df = Arch.vs.celltype.df[(Arch.vs.celltype.df$Celltype != "Glial") & (apply(cbind(ACTIONet_summary$H_unified[, 11], ACTIONet_summary$H_unified[, 29]), 1, max) > 0.5), ]
+
+
+
+# 
+# df = reshape2::melt(Arch.vs.celltype.df)
+# colnames(df) = c("Celltype", "Archetype", "Score")
+# 
+# ggviolin(df, "Archetype", "Score", fill = "Celltype",
+#    palette = c("#4daf4a", "#e41a1c"),
+#    add = "boxplot", add.params = list(fill = "white"))
+
+
+
+require(ggstatsplot)
+gg = ggstatsplot::ggbetweenstats(
+    data = Arch.vs.celltype.df,
+    x = Celltype,
+    y = A11,
+    xlab = "Celltype",
+    ylab = "A11",
+    pairwise.display = "significant", # display only significant pairwise comparisons
+    p.adjust.method = "fdr", # adjust p-values for multiple tests using this method
+    ggtheme = ggthemes::theme_tufte(),
+  ) + scale_color_manual(values = c("#4daf4a", "#e41a1c"))
+
+
+pdf(file.path(figures.path, "A11_vs_celltype.pdf"))
+plot(gg)
+dev.off()
+
+gg = ggstatsplot::ggbetweenstats(
+    data = Arch.vs.celltype.df,
+    x = Celltype,
+    y = A29,
+    xlab = "Celltype",
+    ylab = "A29",
+    pairwise.display = "significant", # display only significant pairwise comparisons
+    p.adjust.method = "fdr", # adjust p-values for multiple tests using this method
+    ggtheme = ggthemes::theme_tufte(),
+  ) + scale_color_manual(values = c("#4daf4a", "#e41a1c"))
+
+
+pdf(file.path(figures.path, "A29_vs_celltype.pdf"))
+plot(gg)
+dev.off()
+
+```
+# Co-association of A11/A29
+```{r}
+sample.df = data.frame(Label = pb.logcounts$ID, Phenotype = pb.logcounts$Phenotype, A11 = scale(pb.logcounts$A11.signature), A29 = scale(pb.logcounts$A29.signature))
+# sample.df = reshape2::melt(sample.df)
+
+# colnames(sample.df)[[3]] = "Archetype"
+  
+
+gg = ggscatter(sample.df, x = "A11", y = "A29", 
+          color = "Phenotype",
+          palette = c("CON" = "lightgray", "SZ" = "red"),
+          label = "Label", repel = TRUE,
+          add = "reg.line",                                 # Add regression line
+          conf.int = TRUE,                                  # Add confidence interval
+          add.params = list(color = "blue",
+                            fill = "lightgray")
+          )+  stat_cor(method = "pearson", label.x = -0.8)#  +xlim(c(-2, 2)) + ylim(c(-2, 2))
+
+pdf(file.path(figures.path, "A11_vs_A29_sample_assignments.pdf"), width = 6, height = 6)
+print(gg)
+dev.off()
+
+outlier.samples = c("SZ7", "SZ31", "SZ44", "SZ33")
+
+```
+
+
+# Compute pattern-specificity
+```{r}
+ace = readr::read_rds("~/results/ACTIONet_reunified.rds")
+
+```
+
+```{r}
+
+mask = grepl("^Ex", ace$Labels) & !(grepl("^NRGN", ace$Labels))
+S.Ex = logcounts(ace)[, mask]
+subH = t(as.matrix(colMaps(ace)$H_unified[mask, c(7, 11, 17, 29)]))
+
+arch.spec.Ex = compute_archetype_feature_specificity(S.Ex, H = subH)
+
+U.Ex = arch.spec.Ex$upper_significance
+rownames(U.Ex) = rownames(ace)
+colnames(U.Ex) = paste("A", c(7, 11, 17, 29), sep = "")
+readr::write_rds(U.Ex, file.path(dataset.path, "Cellstates_vs_Ex_gene_spec.rds"))
+
+
+
+mask = grepl("^In", ace$Labels)
+S.In = logcounts(ace)[, mask]
+subH = t(as.matrix(colMaps(ace)$H_unified[mask, c(7, 11, 17, 29)]))
+
+arch.spec.In = compute_archetype_feature_specificity(S.In, H = subH)
+
+U.In = arch.spec.In$upper_significance
+rownames(U.In) = rownames(ace)
+colnames(U.In) = paste("A", c(7, 11, 17, 29), sep = "")
+readr::write_rds(U.In, file.path(dataset.path, "Cellstates_vs_In_gene_spec.rds"))
+
+
+
+
+mask = grepl("^In|^Ex", ace$Labels)
+S.Neuro = logcounts(ace)[, mask]
+subH = t(as.matrix(colMaps(ace)$H_unified[mask, c(7, 11, 17, 29)]))
+
+arch.spec.Neuro = compute_archetype_feature_specificity(S.Neuro, H = subH)
+
+U.Neuro = arch.spec.Neuro$upper_significance
+rownames(U.Neuro) = rownames(ace)
+colnames(U.Neuro) = paste("A", c(7, 11, 17, 29), sep = "")
+readr::write_rds(U.Neuro, file.path(dataset.path, "Cellstates_vs_Neuro_gene_spec.rds"))
+
+
+
+U = cbind(U.Neuro, U.Ex, U.In)
+colnames(U) = c(paste("Neu_A", c(7, 11, 17, 29), sep = ""), paste("Ex_A", c(7, 11, 17, 29), sep = ""), paste("In_A", c(7, 11, 17, 29), sep = ""))
+idx = grep("^MT-|^RPL|^RPS", rownames(U))
+U = U[-idx, ]
+
+readr::write_rds(U, file.path(dataset.path, "Cellstates_vs_InEx_gene_spec_filtered.rds"))
+
+
+```
+
+```{r}
+U=readr::read_rds(file.path(dataset.path, "Cellstates_vs_InEx_gene_spec_filtered.rds"))
+write.table(U, file.path(tables.path, "cellstates_DE.tsv"), sep = "\t", row.names = T, col.names = T, quote = F)
+
+celltype.spec=readr::read_rds("~/results/datasets/celltype_gene_specificity.rds")
+write.table(celltype.spec, file.path(tables.path, "celltype_gene_specificity.tsv"), sep = "\t", row.names = T, col.names = T, quote = F)
+
+arch.spec=readr::read_rds("~/results/datasets/archetype_gene_specificity.rds")
+write.table(arch.spec, file.path(tables.path, "archetype_gene_specificity.tsv"), sep = "\t", row.names = T, col.names = T, quote = F)
+
+
+
+
+```
+
+```{r}
+data("gProfilerDB_human")
+cellstate.enrichment = assess.geneset.enrichment.from.scores(U, gProfilerDB_human$SYMBOL$`GO:BP`)$logPvals
+colnames(cellstate.enrichment) = colnames(U)
+
+
+readr::write_rds(cellstate.enrichment, file.path(dataset.path, "Cellstates_vs_InEx_gene_spec_filtered_enrichment.rds"))
+
+pdf(file.path(figures.path, "Cellstate_enrichment.pdf"), height = 9)
+plot.top.k.features(cellstate.enrichment, 5)
+dev.off()
+
+pdf(file.path(figures.path, "Cellstate_enrichment_doubleNorm.pdf"), height = 9)
+plot.top.k.features(doubleNorm(cellstate.enrichment), 5)
+dev.off()
+
+
+nerurodev.gene.counts = sort(table(unlist(apply(gProfilerDB_human$SYMBOL$`GO:BP`[, c("generation of neurons", "neurogenesis", "neuron differentiation", "nervous system development")], 2, function(x) rownames(gProfilerDB_human$SYMBOL$`GO:BP`)[x > 0]))), decreasing = T)
+
+neurodev.genes = sort(unique(names(nerurodev.gene.counts)[nerurodev.gene.counts == 4]))
+
+gsea.results = apply(U, 2, function(x) {
+  fgsea.out = fgsea(list(nerurodev = neurodev.genes), x)
+})
+
+gene.counts = sort(table(unlist(lapply(gsea.results[c(2, 4, 6, 8)], function(x) x$leadingEdge))), decreasing = T)
+
+selected.genes = sort(unique(names(gene.counts)[gene.counts == 4]))
+
+# [1] "ABI2"     "ACAP3"    "ACSL4"    "ACTB"     "ADGRB1"   "ADGRB3"   "ADNP"     "AHI1"     "ALCAM"    "ANK3"     "APBB2"   
+# [12] "APP"      "ARHGAP35" "ARHGAP44" "ARID1B"   "ASAP1"    "ATL1"     "ATP2B2"   "ATP8A2"   "AUTS2"    "BEND6"    "BMPR2"   
+# [23] "BRAF"     "BRINP2"   "BRINP3"   "BSG"      "BTBD8"    "CACNA1A"  "CAMK1D"   "CAMK2B"   "CAMSAP2"  "CBFA2T2"  "CCDC88A" 
+# [34] "CDH2"     "CDKL5"    "CEND1"    "CEP290"   "CHD5"     "CHL1"     "CHN1"     "CNTN1"    "CNTN4"    "CNTNAP2"  "CPEB3"   
+# [45] "CSMD3"    "CSNK1E"   "CTNNA2"   "CTNND2"   "CUX1"     "CUX2"     "CYFIP2"   "DAB1"     "DCC"      "DCLK1"    "DCLK2"   
+# [56] "DHFR"     "DLG4"     "DMD"      "DNM3"     "DNMT3A"   "DOK6"     "DSCAML1"  "DYNC2H1"  "EFNA5"    "ELAVL4"   "EPB41L3" 
+# [67] "EPHA6"    "ERBB4"    "EVL"      "EXT1"     "FAIM2"    "FARP1"    "FLRT2"    "FSTL4"    "GABRB1"   "GABRB2"   "GABRB3"  
+# [78] "GAK"      "GDI1"     "GOLGA4"   "GPM6A"    "GRIN1"    "GRIP1"    "GSK3B"    "HCN1"     "HECW1"    "HECW2"    "HERC1"   
+# [89] "HMGB1"    "HPRT1"    "HSP90AA1" "HSP90AB1" "IL1RAPL1" "INPP5F"   "ITSN1"    "JAK2"     "KALRN"    "KDM4C"    "KIF5A"   
+# [100] "KIF5C"    "KIRREL3"  "KNDC1"    "LINGO1"   "LRRC4C"   "MACF1"    "MAGI2"    "MAP1A"    "MAP1B"    "MAP2"     "MAP3K13" 
+# [111] "MAPK1"    "MAPK8IP2" "MAPK8IP3" "MAPT"     "MARK1"    "MDGA2"    "MEF2A"    "MEF2C"    "MIB1"     "MTR"      "MYCBP2"  
+# [122] "MYH10"    "MYO9A"    "MYT1L"    "NCAM1"    "NCDN"     "NCKAP1"   "NCOA1"    "NDRG4"    "NEFM"     "NEGR1"    "NFE2L2"  
+# [133] "NIN"      "NLGN1"    "NLGN4X"   "NRCAM"    "NRXN1"    "NRXN3"    "NTM"      "NTRK2"    "NTRK3"    "OPA1"     "OPCML"   
+# [144] "PAK3"     "PBX1"     "PCDH15"   "PHACTR1"  "PIK3CA"   "PIK3CB"   "PLXNA4"   "PPP1R9A"  "PPP3CA"   "PRKCA"    "PRKD1"   
+# [155] "PRKG1"    "PTPN9"    "PTPRD"    "PTPRG"    "PTPRO"    "PTPRS"    "RAB10"    "RAP1GAP2" "RAPGEF2"  "RARB"     "RB1"     
+# [166] "RBFOX2"   "RERE"     "RIMS1"    "RIMS2"    "RNF157"   "ROBO1"    "ROBO2"    "RORA"     "RTN4"     "RTN4RL1"  "RUFY3"   
+# [177] "SARM1"    "SCLT1"    "SERPINI1" "SH3GL2"   "SH3KBP1"  "SHANK2"   "SHTN1"    "SIPA1L1"  "SLC4A10"  "SLITRK5"  "SNAP25"  
+# [188] "SNPH"     "SOS1"     "SPOCK1"   "SPTAN1"   "SPTBN1"   "SPTBN4"   "SRCIN1"   "SRRM4"    "STMN2"    "STXBP1"   "SUFU"    
+# [199] "SYN1"     "SYT1"     "TCF12"    "TCF4"     "TENM2"    "TENM3"    "TENM4"    "THOC2"    "THRB"     "TIAM1"    "TMEFF2"  
+# [210] "TMEM108"  "TNIK"     "TNR"      "TRAK2"    "TRIO"     "TRIP11"   "UCHL1"    "UNC5C"    "UNC5D"    "USP33"    "WDPCP"   
+# [221] "WNK1"     "YWHAG"    "ZC4H2"    "ZEB1"     "ZEB2"     "ZMYND8"   "ZNF804A"  "ZSWIM5" 
+
+
+```
+
+
+```{r}
+cc = cor(U, -DE.sc[-idx, ])
+cc[cc < 0.1] = 0
+Heatmap(cc)
+
+```
+
+
+```{r}
+
+mask = ACTIONet_summary$metadata$assigned_archetype %in% c(7, 11, 17, 29)
+
+cell.df = data.frame(Phenotype = ACTIONet_summary$metadata$Phenotype[mask], Celltype = ACTIONet_summary$metadata$Labels[mask], A7 = scale(ACTIONet_summary$H_unified[mask, 7]), A11 = scale(ACTIONet_summary$H_unified[mask, 11]), A17 = scale(ACTIONet_summary$H_unified[mask, 17]), A29 = scale(ACTIONet_summary$H_unified[mask, 29]))
+
+# cell.df = cell.df[grepl("^In|^Ex", cell.df$Celltype)&!grepl("NRGN", cell.df$Celltype), ]
+cell.df = cell.df[grepl("^In|^Ex", cell.df$Celltype), ]
+
+cell.df2 = reshape2::melt(cell.df)
+colnames(cell.df2)[[3]] = "Archetype"
+cell.df2$Celltype = factor(cell.df2$Celltype, names(colors))
+
+
+
+gg = ggbarplot(cell.df2, "Archetype", "value", fill = "Celltype", palette = colors, position = position_dodge(), add = "mean_se") + ylab("Archetype score (scaled)")
+
+pdf(file.path(figures.path, "Cellstates_vs_celltypes_neuro_plusNRGN.pdf"), width = 12, height = 5)
+plot(gg)
+dev.off()
+
+
+sub.cell.df2 = cell.df2[cell.df2$Archetype == "A17", ]
+IDX = split(sub.cell.df2$value, sub.cell.df2$Celltype)
+
+cls = scales::col_numeric(pals::brewer.rdbu(9), domain = NULL)(sapply(IDX, mean))
+names(cls) = names(IDX)
+sub.cell.df2$color = cls[sub.cell.df2$Celltype]
+
+sub.cell.df2$Celltype = factor(sub.cell.df2$Celltype, names(IDX)[order(sapply(IDX, mean), decreasing = T)])
+
+gg = ggbarplot(sub.cell.df2, "Celltype", "value", fill = "Celltype", palette = colors, position = position_dodge(), add = "mean_se") + ylab("Archetype score (scaled)") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, color=colors))
+
+pdf(file.path(figures.path, "Cellstates_vs_celltypes_neuro_plusNRGN_SZTR_only_small.pdf"), width = 5, height = 5)
+plot(gg)
+dev.off()
+
+
+
+```
+
+
+```{r}
+# X = assays(pb.logcounts)[["Ex-L45_MET"]][selected.genes, ]
+# 
+# X.orth = orthoProject(X, Matrix::rowMeans(X))
+# X.orth[is.na(X.orth)] = 0
+# Heatmap(X.orth)
+
+
+overlap.genes = lapply(DE.new$Down.genes, function(gs) intersect(selected.genes, gs))
+x = sort(table(unlist(overlap.genes)), decreasing = T)
+x[1:30]
+
+```
+
+
+```{r}
+bulk = readr::read_rds("~/results/input/MPP_bulk_expression_SZandCON.rds")
+bulk.profile = assays(bulk)$voom
+bulk.profile.orth = orthoProject(bulk.profile, Matrix::rowMeans(bulk.profile))
+
+```
+
+
+```{r}
+idx = grep("^MT-|^RPL|^RPS|^PSM|^EIF|^MRP", rownames(U))
+cellstate.panel = log1p(U[-idx, ])
+
+
+common.genes = intersect(rownames(cellstate.panel), rownames(bulk.profile.orth))
+
+SZ.pred = -cor(bulk.profile.orth[common.genes, ], cellstate.panel[common.genes, ], method = "spearman")
+rownames(SZ.pred) = bulk$SampleID
+
+CC = cor(t(bulk.profile.orth[common.genes, ]), SZ.pred, method = "spearman")
+scores = cbind(exp(3*CC), exp(-3*CC))
+colnames(scores) = c(paste("Up_", colnames(CC), sep = ""), paste("Down_", colnames(CC), sep = ""))
+rownames(scores) = common.genes
+
+En = assess.geneset.enrichment.from.scores(scores, gProfilerDB_human$SYMBOL$`GO:BP`)
+logPvals = En$logPvals
+colnames(logPvals) = colnames(scores)
+
+plot.top.k.features((logPvals))
+
+
+
+```
+```{r}
+X = assays(pb.logcounts)[["Ex-L23"]]
+X.orth = orthoProject(X, fast_row_sums(X))
+subX = X.orth[, c("SZ7", "SZ31", "SZ44", "SZ33")]
+
+```
+
+```{r}
+
+# bulk.profile = assays(bulk)$voom
+# bulk.profile = orthoProject(bulk.profile, Matrix::rowMeans(bulk.profile))
+
+idx = grep("^MT-|^RPL|^RPS", rownames(U.Neuro))
+cellstate.panel = U.Neuro[-idx, ]
+
+
+common.genes = intersect(rownames(cellstate.panel), rownames(bulk.profile))
+
+SZ.pred = -cor(bulk.profile[common.genes, ], cellstate.panel[common.genes, ], method = "spearman")
+rownames(SZ.pred) = bulk$SampleID
+
+arch.df = data.frame(Id = bulk$SampleID, Phenotype = bulk$Dx, A11 = SZ.pred[, "A11"], A29 = SZ.pred[, "A29"])
+
+
+
+
+
+
+
+
+
+```
+
+
+```{r}
+require(ggpubr)
+Ll = c("SZ", "CON")
+arch.df = data.frame(Id = bulk$SampleID, Phenotype = bulk$Dx, A11 = SZ.pred[, "A11"], A29 = SZ.pred[, "A29"], A7 = SZ.pred[, "A7"], Label = "")
+arch.df$Phenotype = factor(Ll[as.numeric(arch.df$Phenotype == "SCZ")+1], Ll)
+
+gg = ggscatter(arch.df, x = "A11", y = "A29", 
+          color = "Phenotype",
+          palette = c("CON" = "black", "SZ" = "red"),
+          label = "Label", repel = TRUE,
+          add = "reg.line",                                 # Add regression line
+          conf.int = TRUE,                                  # Add confidence interval
+          add.params = list(color = "blue",
+                            fill = "lightgray")
+          ) + stat_cor(method = "pearson")#  +xlim(c(-2, 2)) + ylim(c(-2, 2))
+
+# pdf(file.path(figures.path, "Supp", "TPS_vs_SZTR.pdf"), width = 6, height = 6)
+print(gg)
+# dev.off()
+
+```
+
+
+```{r}
+arch.df$pred = scale(arch.df$A29)
+# arch.df$pred = scale(runif(length(arch.df$A11)))
+
+data = bulk.profile[common.genes, ]
+# plot(density(data[, 4]))
+# data = normalizeQuantiles(data)
+mod = model.matrix( ~0 + pred, arch.df)
+fit = lmFit(data, mod)
+fit<-eBayes(fit)
+tbl = limma::topTable(
+  fit = fit,
+  coef=1,
+  number = Inf,
+  adjust.method = "BH",
+  sort.by = "t"
+)
+
+gp = gProfileR::gprofiler(query = rownames(tbl), ordered_query = T)  
+
+  
+require(EnhancedVolcano)
+EnhancedVolcano(tbl , x = "logFC", y = "adj.P.Val", lab = rownames(tbl))
+  
+```
+
+```{r}
+SZ.associations = as(cbind(as.numeric(bulk$Dx == "SCZ"), as.numeric(bulk$Dx == "Control")), "sparseMatrix")
+colnames(SZ.associations) = c("SZ", "CON")
+
+scores = exp(-3*SZ.pred)
+rownames(SZ.associations) = colnames(scores) = bulk$SampleID
+
+XX = t(assess.geneset.enrichment.from.scores(t(scores), SZ.associations)$logPvals)
+rownames(XX) = colnames(panel)
+# Heatmap(XX)
+
+```
+
+```{r}
+
+
+Dx = split(bulk$SampleID, bulk$Dx)
+
+# Pvals = apply(SZ.pred, 2, function(x) {
+#   out = fgsea(Dx, x)
+#   pvals = out$pval
+#   names(pvals) = names(Dx)
+#   return(pvals)
+# })
+
+l = as.numeric(bulk$Dx == "SCZ")
+mhg.Pvals.CON = apply(SZ.pred, 2, function(x) {
+  perm = order(x, decreasing = T)
+  x = l[perm]
+  mhg.out = mhg::mhg_test(x, length(x), sum(x), length(x), 1, upper_bound = F, tol = 1e-300) 
+  return(mhg.out$pvalue)
+})
+
+mhg.Pvals.SZ = apply(SZ.pred, 2, function(x) {
+  perm = order(x, decreasing = F)
+  x = l[perm]
+  mhg.out = mhg::mhg_test(x, length(x), sum(x), length(x), 1, upper_bound = F, tol = 1e-300) 
+  return(mhg.out$pvalue)
+})
+
+
+En = -log10(matrix(p.adjust(c(mhg.Pvals.SZ, mhg.Pvals.CON), "fdr"), ncol = 2))
+rownames(En) = colnames(cellstate.panel)
+colnames(En) = c("SZ", "CON")
+En = round(En, 2)
+
+
+
+SZ.pred
+
+# 
+#   x = SZ.pred[, "A29"]
+#   perm = order(x, decreasing = F)
+#   x = l[perm]
+#   mhg.out = mhg::mhg_test(x, length(x), sum(x), 100, 1, upper_bound = F, tol = 1e-300) 
+#   plot(-log10(mhg.out$mhg))
+
+
+
+
+# SZ.associations = as(cbind(as.numeric(bulk$Dx == "SCZ"), as.numeric(bulk$Dx == "Control")), "sparseMatrix")
+# colnames(SZ.associations) = c("SZ", "CON")
+# 
+# scores = exp(-3*SZ.pred)
+# rownames(SZ.associations) = colnames(scores) = bulk$SampleID
+
+
+
+
+# XX = t(assess.geneset.enrichment.from.scores(t(scores), SZ.associations)$logPvals)
+# rownames(XX) = colnames(cellstate.panel)
+
+```
+
+```{r}
+Up.DE.enrichment = annotate.archetypes.using.markers(ACTIONet_summary$unified_feature_specificity, DE.new$Up.genes)
+
+Y = t(Up.DE.enrichment$Enrichment)
+colnames(Y) = paste("A", 1:ncol(X), sep = "")
+Rd.pal = circlize::colorRamp2(seq(0, quantile(Y, 0.99), length.out = 8), c("#ffffff", pals::brewer.reds(7)))
+
+
+Down.DE.enrichment = annotate.archetypes.using.markers(ACTIONet_summary$unified_feature_specificity, DE.new$Down.genes)
+
+X = t(Down.DE.enrichment$Enrichment)
+Bu.pal = circlize::colorRamp2(seq(0, quantile(X, 0.99), length.out = 8), c("#ffffff", pals::brewer.blues(7)))
+
+colnames(X) = paste("A", 1:ncol(X), sep = "")
+
+# arch.perm = order(apply(rbind(X, Y), 2, mean), decreasing = T)
+# 
+# Heatmap(t(Y[, arch.perm]), rect_gp = gpar(col = "black"), col = Rd.pal, cluster_rows = F, cluster_columns = F, column_names_gp = gpar(col = colors[rownames(Y)]), name = "Up", column_title = "Up") + Heatmap(t(X[, arch.perm]), rect_gp = gpar(col = "black"), col = Bu.pal, cluster_columns = F, column_names_gp = gpar(col = colors[rownames(X)]), name = "Down", column_title = "Down")
+
+# arch.perm = order(apply(rbind(X), 2, mean), decreasing = T)
+arch.perm = order(apply(rbind(X, Y), 2, mean), decreasing = T)
+
+pdf(file.path(figures.path, "arch_gene_spec_vs_DE_up.pdf"), width = 5, height = 8)
+Heatmap(t(Y[, arch.perm]), cluster_rows = F, rect_gp = gpar(col = "black"), col = Rd.pal, cluster_columns = F, column_names_gp = gpar(col = colors[rownames(X)]), name = "Up", column_title = "Up", row_names_side = "left")
+dev.off()
+
+
+pdf(file.path(figures.path, "arch_gene_spec_vs_DE_down.pdf"), width = 5, height = 8)
+Heatmap(t(X[, arch.perm]), cluster_rows = F, rect_gp = gpar(col = "black"), col = Bu.pal, cluster_columns = F, column_names_gp = gpar(col = colors[rownames(X)]), name = "Down", column_title = "Down", row_names_side = "left")
+dev.off()
+
+```
+```{r, eval = F}
+
+DE.down.vs.arch.fgsea = apply(ACTIONet_summary$unified_feature_specificity, 2, function(x) {
+  fgsea.out = fgsea(DE.new$Down.genes, x, eps = 1e-100)
+  
+  v = fgsea.out$pval
+  names(v) = fgsea.out$pathway
+  return(v)
+})
+
+DE.down.vs.arch.fgsea.enrichment = -log10(DE.down.vs.arch.fgsea)
+Heatmap(DE.down.vs.arch.fgsea.enrichment)
+
+```
+
+## Enrichment
+```{r}
+archs = c(29,11, 17, 7)
+
+arch.enrichment.phenotype = presto::wilcoxauc(t(ACTIONet_summary$H_unified), ACTIONet_summary$metadata$Phenotype)
+arch.enrichment.phenotype = matrix(arch.enrichment.phenotype$auc-0.5, nrow=ncol(ACTIONet_summary$H_unified))
+rownames(arch.enrichment.phenotype) = paste("A", 1:nrow(arch.enrichment.phenotype), sep = "")
+colnames(arch.enrichment.phenotype) = levels(ACTIONet_summary$metadata$Phenotype)
+
+arch.enrichment.ind = presto::wilcoxauc(t(ACTIONet_summary$H_unified), ACTIONet_summary$metadata$Individual)
+arch.enrichment.ind = matrix(arch.enrichment.ind$auc-0.5, nrow=ncol(ACTIONet_summary$H_unified))
+rownames(arch.enrichment.ind) = paste("A", 1:nrow(arch.enrichment.ind), sep = "")
+
+arch.enrichment.celltype = presto::wilcoxauc(t(ACTIONet_summary$H_unified), ACTIONet_summary$metadata$Labels)
+rn = unique(arch.enrichment.celltype$group)
+arch.enrichment.celltype = matrix(arch.enrichment.celltype$auc-0.5, nrow=ncol(ACTIONet_summary$H_unified))
+rownames(arch.enrichment.celltype) = paste("A", 1:nrow(arch.enrichment.celltype), sep = "")
+colnames(arch.enrichment.celltype) = rn
+
+
+ha_ct = columnAnnotation(Celltype = factor(names(DE.new$Up.genes), names(DE.new$Up.genes)), col = list(Celltype = colors[names(DE.new$Up.genes)]))
+
+xx = t(scale(t(arch.enrichment.ind[archs, ])))
+colnames(xx) = c()
+
+yy = t(scale(t(arch.enrichment.celltype[archs, names(DE.new$Up.genes)])))
+colnames(yy) = c()
+
+zz = as.matrix(scale(arch.enrichment.phenotype[archs, 2]))
+
+sample_perm = order(apply(xx[1:2, ], 2, max), decreasing = T)
+ha_pheno = columnAnnotation(Phenotype = pb.logcounts$Phenotype[sample_perm], col = list(Phenotype = c("CON" = "gray", "SZ" = "red")))
+
+pdf(file.path(figures.path, "Cellstate_heatmaps.pdf"), width = 32, height = 4)
+Heatmap(zz, cluster_rows = F, row_names_side = "left", name = "Pheno", column_title = "Pheno", show_column_dend = F, rect_gp = gpar(col = "black"))+ Heatmap(yy, name = "Celltype", cluster_columns = F, row_names_side = "left", top_annotation = ha_ct, rect_gp = gpar(col = "black")) + Heatmap(xx[, sample_perm], cluster_rows = F, name = "Samples", column_title = "Samples", show_column_dend = F, top_annotation = ha_pheno) 
+dev.off()
+
+
+```
+

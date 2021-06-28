@@ -1,0 +1,436 @@
+---
+title: "Cell annotation and visualization"
+subtitle: ''
+author: "Shahin Mohammadi"
+date: "Run on `r Sys.time()`"
+documentclass: article
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+suppressPackageStartupMessages({
+library(ACTIONet)
+library(data.table)
+library(ggplot2)
+library(ggrepel)
+library(cowplot)
+library(corrplot)
+library(muscat)
+library(synapser)
+library(synExtra)
+synLogin(rememberMe = TRUE)
+source("functions.R")
+})
+
+knitr::opts_chunk$set(
+	eval = FALSE,
+	error = FALSE,
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	dev = c("png", "pdf"),
+	include = FALSE,
+	tidy = FALSE
+)
+
+
+```
+
+
+```{r}
+# devtools::load_all("~/ACTIONet/")
+install.packages("~/ACTIONet/", repos = NULL)
+
+```
+
+
+```{r}
+dataset.path = "~/results/datasets/"
+figures.path = "~/results/figures"
+tables.path = "~/results/tables"
+input.path = "~/results/input"
+
+colors = loadDataset("celltype_colors", dataset.path = dataset.path)
+ACTIONet_summary = loadDataset("ACTIONet_summary", dataset.path = dataset.path)
+
+```
+
+
+
+
+# Plot main ACTIONet
+## Celltypes
+```{r}
+gg = plot.ACTIONet(ACTIONet_summary$ACTIONet2D, ACTIONet_summary$metadata$Labels, palette = colors, text_size = 2, use_repel = T)
+
+storeFigure(gg, name = "ACTIONet_annotated", extension = "png", figures.path = figures.path, width = 8, height = 6)
+
+```
+
+## Supps
+### Phenotype
+```{r}
+gg = plot.ACTIONet(ACTIONet_summary$ACTIONet2D, ACTIONet_summary$metadata$Phenotype, palette = c("#cccccc", "#888888"), text_size = 2, use_repel = T, add_text_labels = F, point_size = 0.5)
+
+storeFigure(gg, name = "ACTIONet_phenotype_annotated_no_labels", extension = "png", figures.path = figures.path, width = 8, height = 6)
+
+```
+
+### Batch
+```{r}
+gg = plot.ACTIONet(ACTIONet_summary$ACTIONet2D, ACTIONet_summary$metadata$Batch, text_size = 2, use_repel = T, add_text_labels = F, point_size = 0.5)
+
+storeFigure(gg, name = "ACTIONet_batch_annotated_no_labels", extension = "png", figures.path = figures.path, width = 8, height = 6)
+
+```
+
+### Gender
+```{r}
+mask = !is.na(ACTIONet_summary$metadata$Gender)
+gg = plot.ACTIONet(ACTIONet_summary$ACTIONet2D[mask, ], ACTIONet_summary$metadata$Gender[mask], text_size = 2, use_repel = T, add_text_labels = F, point_size = 0.5, palette = c("pink", "#91bfdb"))
+
+storeFigure(gg, name = "ACTIONet_gender_annotated_no_labels", extension = "png", figures.path = figures.path, width = 8, height = 6)
+
+```
+
+### Archetype
+```{r}
+gg = plot.ACTIONet(ACTIONet_summary$ACTIONet2D, ACTIONet_summary$metadata$assigned_archetype, text_size = 2, use_repel = T, add_text_labels = F, point_size = 0.5, palette = as.character(pals::polychrome(31)))
+
+storeFigure(gg, name = "ACTIONet_archetypes_annotated_no_labels", extension = "png", figures.path = figures.path, width = 8, height = 6)
+
+```
+
+### Dataset
+```{r}
+gg = plot.ACTIONet(ACTIONet_summary$ACTIONet2D, ACTIONet_summary$metadata$dataset, text_size = 2, use_repel = T, add_text_labels = F, point_size = 0.5, palette = c("#f1a340", "#998ec3"))
+
+
+storeFigure(gg, name = "ACTIONet_datasets_annotated_no_labels", extension = "png", figures.path = figures.path, width = 8, height = 6)
+
+```
+
+
+## Plot ACTIONet plots per dataset
+### McLean dataset
+```{r}
+mask = ACTIONet_summary$metadata$dataset == "McLean"
+DS1.coors = ACTIONet_summary$ACTIONet2D[mask, ]
+DS1.labels = ACTIONet_summary$metadata$Labels[mask]
+
+gg = plot.ACTIONet(DS1.coors, DS1.labels, palette = colors, text_size = 2, use_repel = T)
+
+storeFigure(gg, name = "ACTIONet_annotated_DS1", extension = "png", figures.path = figures.path, width = 8, height = 6)
+
+```
+
+
+### MtSinai dataset
+```{r}
+mask = ACTIONet_summary$metadata$dataset == "MtSinai"
+DS2.coors = ACTIONet_summary$ACTIONet2D[mask, ]
+DS2.labels = ACTIONet_summary$metadata$Labels[mask]
+
+gg = plot.ACTIONet(DS1.coors, DS1.labels, palette = colors, text_size = 2, use_repel = T)
+
+storeFigure(gg, name = "ACTIONet_annotated_DS2", extension = "png", figures.path = figures.path, width = 8, height = 6)
+
+```
+
+
+# Plot cell type fraction stats
+## Identify and filter outlier samples (based on the % of Ex cells)
+In total, 5 samples are filtered, all of which are SZ (SZ33, SZ24, SZ29, SZ3, and SZ15)
+
+```{r}
+require(ggpubr)
+
+ncells = apply(table(ACTIONet_summary$metadata$Labels, ACTIONet_summary$metadata$Individual), 2, as.numeric)
+rownames(ncells) = levels(ACTIONet_summary$metadata$Labels)
+
+cs = Matrix::colSums(ncells)
+ncells.freq = 100*scale(ncells, center = F, scale = cs)
+Ex.perc = (fast_column_sums(ncells.freq[grepl("^Ex", rownames(ncells.freq)), ]))
+
+df = data.frame(sample = colnames(ncells), perc = Ex.perc)
+gg = ggdensity(df, x = "perc", fill = "lightgray",
+   add = "mean", rug = TRUE) + xlim(c(0, 100))
+
+storeFigure(gg, name = "Ex_perc_density", extension = "png", figures.path = figures.path, width = 8, height = 6)
+
+ncells.freq = ncells.freq[, order(Ex.perc, decreasing = T)]
+Ex.perc = (fast_column_sums(ncells.freq[grepl("^Ex", rownames(ncells.freq)) & !grepl("^Ex-NRGN", rownames(ncells.freq)), ]))
+
+mask = (Ex.perc >= 10) & (Ex.perc <= 80) 
+filtered.samples = colnames(ncells.freq)[which(!mask)]
+ncells.freq = ncells.freq[, mask]
+
+
+```
+
+
+## Plot cell type fractions for the rest of samples
+```{r}
+X = ncells.freq
+df = reshape2::melt(X)
+colnames(df)=c("celltype", "sample", "freq")
+
+df$celltype = factor(df$celltype, names(colors))
+
+gg = ggbarplot(df, "sample", "freq",
+  fill = "celltype", color = "black", palette = colors[levels(df$celltype)], xlab = "Individual", ylab = "Percentage") + theme(axis.text.x = element_text(face="bold", size=8, angle=90,hjust=0.95,vjust=0.2), axis.text.y = element_text(face="bold", size=12, angle=0), axis.title = element_text(face="bold", size=18, angle=0))
+
+storeFigure(gg, name = "celltype_perc_joint", extension = "png", figures.path = figures.path, width = 8, height = 6)
+
+```
+
+## Plot cell type fraction stats per phenotype
+```{r}
+n_cells = table(ACTIONet_summary$metadata$Labels, ACTIONet_summary$metadata$Individual)
+
+X.CON = apply(n_cells[, grep("CON", colnames(n_cells))], 2, as.numeric)
+X.SZ = apply(n_cells[, grep("SZ", colnames(n_cells))], 2, as.numeric)
+rownames(X.CON) = rownames(X.SZ) = levels(ACTIONet_summary$metadata$Labels)
+
+
+Perc = t(apply(cbind(Matrix::rowMeans(X.CON), Matrix::rowMeans(X.SZ)), 1, function(x) 100*x / sum(x)))
+colnames(Perc) = c("CON", "SZ")
+Perc = Perc[order(Perc[, 1] - Perc[, 2], decreasing = T), ]
+
+df = reshape2::melt(Perc)
+colnames(df) = c("Celltype", "Phenotype", "Perc")
+df$Celltype = factor(df$Celltype, names(colors))
+
+gg = ggbarplot(df, "Celltype", "Perc", fill = "Phenotype", palette = c("#cccccc", "#888888"))+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, colour = colors)) + xlab("Celltype") + ylab("Percentage")
+
+storeFigure(gg, name = "Celltype_perc_per_phenotype", extension = "png", figures.path = figures.path, width = 8, height = 6)
+
+```
+
+
+
+# Plot gene/umi statistics
+## Per cell type
+```{r}
+umis = ACTIONet_summary$metadata$umi_count
+mito.perc = ACTIONet_summary$metadata$mito_perc
+genes = ACTIONet_summary$metadata$gene_counts
+dataset = ACTIONet_summary$metadata$dataset
+indiv = ACTIONet_summary$metadata$Individual
+celltype = ACTIONet_summary$metadata$Labels
+df = data.frame(celltype = celltype, umis = umis, genes = genes, mito = mito.perc, dataset = dataset, individual = indiv)  
+
+df$celltype = factor(df$celltype, names(colors))
+
+```
+
+### McLean
+```{r}
+require(ggpubr)
+gg = ggviolin(df[df$dataset == "McLean", ], "celltype", "umis", fill = "celltype", palette = colors,
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Celltype") + ylab("UMIs")+ theme(legend.position = "none")
+storeFigure(gg, name = "McLean_umis", extension = "png", figures.path = figures.path, width = 8, height = 6)
+
+
+require(ggpubr)
+gg = ggviolin(df[df$dataset == "McLean", ], "celltype", "genes", fill = "celltype", palette = colors,
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Celltype") + ylab("genes")+ theme(legend.position = "none")
+storeFigure(gg, name = "McLean_genes", extension = "png", figures.path = figures.path, width = 8, height = 6)
+
+
+gg = ggviolin(df[df$dataset == "McLean", ], "celltype", "mito", fill = "celltype", palette = colors,
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Celltype") + ylab("mito") + ylim(c(0, 10))+ theme(legend.position = "none")
+storeFigure(gg, name = "McLean_mito", extension = "png", figures.path = figures.path, width = 8, height = 6)
+
+```
+
+### MtSinai
+```{r}
+gg = ggviolin(df[df$dataset == "MtSinai", ], "celltype", "umis", fill = "celltype", palette = colors,
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Celltype") + ylab("UMIs")+ theme(legend.position = "none")
+storeFigure(gg, name = "MtSinai_umis", extension = "png", figures.path = figures.path, width = 8, height = 6)
+
+
+gg = ggviolin(df[df$dataset == "MtSinai", ], "celltype", "genes", fill = "celltype", palette = colors,
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Celltype") + ylab("genes")+ theme(legend.position = "none")
+storeFigure(gg, name = "MtSinai_genes", extension = "png", figures.path = figures.path, width = 8, height = 6)
+
+
+gg = ggviolin(df[df$dataset == "MtSinai", ], "celltype", "mito", fill = "celltype", palette = colors,
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("Celltype") + ylab("mito") + ylim(c(0, 10))+ theme(legend.position = "none")
+storeFigure(gg, name = "MtSinai_mito", extension = "png", figures.path = figures.path, width = 8, height = 6)
+
+
+```
+
+## Per sample
+```{r}
+umis.per.ind = split(ACTIONet_summary$metadata$umi_count, ACTIONet_summary$metadata$Individual)
+mean.umis = sapply(umis.per.ind, mean)
+
+df$individual = factor(as.character(df$individual), names(mean.umis)[order(mean.umis, decreasing = T)])
+
+```
+
+### McLean
+```{r}
+require(ggpubr)
+gg = ggviolin(df[df$dataset == "McLean", ], "individual", "umis", fill = "individual",
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("individual") + ylab("UMIs")+ theme(legend.position = "none")
+storeFigure(gg, name = "McLean_umis_per_sample", extension = "png", figures.path = figures.path, width = 11, height = 6)
+
+
+require(ggpubr)
+gg = ggviolin(df[df$dataset == "McLean", ], "individual", "genes", fill = "individual",
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("individual") + ylab("genes")+ theme(legend.position = "none")
+storeFigure(gg, name = "McLean_genes_per_sample", extension = "png", figures.path = figures.path, width = 11, height = 6)
+
+
+gg = ggviolin(df[df$dataset == "McLean", ], "individual", "mito", fill = "individual",
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("individual") + ylab("mito") + ylim(c(0, 10))+ theme(legend.position = "none")
+storeFigure(gg, name = "McLean_mito_per_sample", extension = "png", figures.path = figures.path, width = 11, height = 6)
+
+```
+
+### MtSinai
+```{r}
+gg = ggviolin(df[df$dataset == "MtSinai", ], "individual", "umis", fill = "individual",
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("individual") + ylab("UMIs")+ theme(legend.position = "none")
+storeFigure(gg, name = "MtSinai_umis_per_sample", extension = "png", figures.path = figures.path, width = 18, height = 6)
+
+
+gg = ggviolin(df[df$dataset == "MtSinai", ], "individual", "genes", fill = "individual",
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("individual") + ylab("genes")+ theme(legend.position = "none")
+storeFigure(gg, name = "MtSinai_genes_per_sample", extension = "png", figures.path = figures.path, width = 18, height = 6)
+
+
+gg = ggviolin(df[df$dataset == "MtSinai", ], "individual", "mito", fill = "individual",
+   add = "boxplot")+ theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + xlab("individual") + ylab("mito") + ylim(c(0, 10))+ theme(legend.position = "none")
+storeFigure(gg, name = "MtSinai_mito_per_sample", extension = "png", figures.path = figures.path, width = 18, height = 6)
+
+
+```
+
+
+
+
+
+
+
+# Plot mappings of cell type annotations to other annotations
+## Load markers
+```{r}
+data("curatedMarkers_human")
+Layer.markers = loadInputDataset("Maynard_layer_marker", "rds")
+Layer.markers = Layer.markers[c(2:7, 1)]
+Velmeshev.markers = loadInputDataset("Velmeshev", "tsv")
+Velmeshev.markers = split(Velmeshev.markers$`Gene name`, Velmeshev.markers$`Cell type`)
+Mohammadi.markers = curatedMarkers_human$Brain$PFC$Mohammadi2020$marker.genes
+
+celltype.gene.spec = loadDataset("celltype_gene_specificity")
+
+rdbu_fun = circlize::colorRamp2(c(-3, -1, 0, 1, 3), rev(pals::brewer.rdbu(9)[seq(1, 9, by = 2)]))
+
+```
+
+## Annotate
+### Layers (Maynard et al., 2021)
+```{r}
+X = as(do.call(cbind, lapply(Layer.markers, function(gs) as.numeric(rownames(celltype.gene.spec) %in% gs))), "dgCMatrix")
+rownames(X) = rownames(celltype.gene.spec)
+Layer.annot = assess.geneset.enrichment.from.scores(celltype.gene.spec, X)
+
+Z  = scale(t(Layer.annot$logPvals))
+rownames(Z) = colnames(celltype.gene.spec)
+colnames(Z) = c(paste("L", c(1:6), sep = ""), "WM")
+
+ht = Heatmap(Z, cluster_rows = F, cluster_columns = F, rect_gp = gpar(col = "black"), row_names_side = "left", row_names_gp = gpar(col = colors), col = rdbu_fun, name = "Layer", column_title = "Layer (Maynard et al.)")
+
+storeFigure(ht, name = "Layer_annotation_Maynard", extension = "pdf", figures.path = figures.path, width = 4, height = 8)
+
+
+```
+
+### Cell types (Mohammadi et al., 2019)
+```{r}
+X = as(do.call(cbind, lapply(curatedMarkers_human$Brain$PFC$Mohammadi2020$marker.genes, function(gs) as.numeric(rownames(celltype.gene.spec) %in% gs))), "dgCMatrix")
+rownames(X) = rownames(celltype.gene.spec)
+Celltype.annot = assess.geneset.enrichment.from.scores(celltype.gene.spec, X)
+
+Z  = scale(t(Celltype.annot$logPvals))
+rownames(Z) = colnames(celltype.gene.spec)
+
+M = as(t(MWM_hungarian(t(Celltype.annot$logPvals))), "dgTMatrix")
+
+ht = Heatmap(Z[, M@i+1], cluster_rows = F, cluster_columns = F, rect_gp = gpar(col = "black"), row_names_side = "left", row_names_gp = gpar(col = colors), col = rdbu_fun, name = "Celltypes", column_title = "Celltypes (Mohammadi et al.)")
+
+storeFigure(ht, name = "celltype_annotation_mohammadi_markers", extension = "pdf", figures.path = figures.path, width = 6, height = 8)
+
+```
+
+### Cell types (Velmeshev et al., 2019)
+```{r}
+X = as(do.call(cbind, lapply(curatedMarkers_human$Brain$PFC$Velmeshev2019$marker.genes, function(gs) as.numeric(rownames(celltype.gene.spec) %in% gs))), "dgCMatrix")
+rownames(X) = rownames(celltype.gene.spec)
+Celltype.annot = assess.geneset.enrichment.from.scores(celltype.gene.spec, X)
+
+
+Z  = scale(t(Celltype.annot$logPvals))
+rownames(Z) = colnames(celltype.gene.spec)
+
+M = as(t(MWM_hungarian(t(Celltype.annot$logPvals))), "dgTMatrix")
+
+
+ht = Heatmap(Z[, M@i+1], cluster_rows = F, cluster_columns = F, rect_gp = gpar(col = "black"), row_names_side = "left", row_names_gp = gpar(col = colors), col = rdbu_fun, name = "Celltypes", column_title = "Celltypes (Velmeshev et al.)")
+
+storeFigure(ht, name = "celltype_annotation_velmeshev_markers", extension = "pdf", figures.path = figures.path, width = 6, height = 8)
+
+```
+### Cell types (Mathys et al., 2019)
+```{r}
+X = as(do.call(cbind, lapply(curatedMarkers_human$Brain$PFC$MathysDavila2019$marker.genes, function(gs) as.numeric(rownames(celltype.gene.spec) %in% gs))), "dgCMatrix")
+rownames(X) = rownames(celltype.gene.spec)
+Celltype.annot = assess.geneset.enrichment.from.scores(celltype.gene.spec, X)
+
+
+
+Z  = scale(t(Celltype.annot$logPvals))
+rownames(Z) = colnames(celltype.gene.spec)
+
+
+M = as(t(MWM_hungarian(t(Celltype.annot$logPvals))), "dgTMatrix")
+
+ht = Heatmap(Z[, M@i+1], cluster_rows = F, cluster_columns = F, rect_gp = gpar(col = "black"), row_names_side = "left", row_names_gp = gpar(col = colors), col = rdbu_fun, name = "Celltypes", column_title = "Celltypes (Mathys and Davilla et al.)")
+
+storeFigure(ht, name = "celltype_annotation_mathys_markers", extension = "pdf", figures.path = figures.path, width = 10, height = 8)
+
+```
+
+## Bulk Layers (He et al., 2017)
+```{r}
+X = as(do.call(cbind, lapply(curatedMarkers_human$Brain$Layers$marker.genes, function(gs) as.numeric(rownames(celltype.gene.spec) %in% gs))), "dgCMatrix")
+rownames(X) = rownames(celltype.gene.spec)
+Celltype.annot = assess.geneset.enrichment.from.scores(celltype.gene.spec, X)
+
+
+
+Z  = scale(t(Celltype.annot$logPvals))
+rownames(Z) = colnames(celltype.gene.spec)
+
+ht = Heatmap(Z, cluster_rows = F, cluster_columns = F, rect_gp = gpar(col = "black"), row_names_side = "left", row_names_gp = gpar(col = colors), col = rdbu_fun, name = "Layers", column_title = "Layers (He et al.)")
+
+storeFigure(ht, name = "Layer_annotation_He_markers", extension = "pdf", figures.path = figures.path, width = 4, height = 8)
+
+```
+
+
+
+
+
+
+
+
+

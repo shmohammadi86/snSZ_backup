@@ -1,0 +1,583 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r include=FALSE}
+require(muscat)
+
+```
+
+```{r}
+sce = readr::read_rds("~/results/sub_SZ_AstOliSST.rds")
+sce = as(sce, "SingleCellExperiment")
+
+```
+
+
+```{r}
+sce$group_id = sce$Phenotype
+sce$cluster_id = factor(sce$assigned_archetype)
+sce$sample_id = sce$Individual
+
+library(muscat)
+sce$id <- paste0(sce$Phenotype, sce$sample_id)
+(sce <- prepSCE(sce,
+    kid = "cluster_id", # subpopulation assignments
+    gid = "group_id",  # group IDs (ctrl/stim)
+    sid = "sample_id",   # sample IDs (ctrl/stim.1234)
+    drop = TRUE))  # drop all other colData columns
+
+pb.logcounts <- aggregateData(sce,
+    assay = "logcounts", fun = "mean",
+    by = c("cluster_id", "sample_id"))
+
+saveRDS(pb.logcounts, file = "~/PFC_v3/PB_mean_logcounts_renormalized_subtypes.RDS")
+
+```
+
+```{r}
+pb.logcounts = readRDS(file = "~/PFC_v3/PB_mean_logcounts_renormalized_subtypes.RDS")
+
+meta.data = readRDS("~/PFC_v3/merged_metadata_with_SZTR.rds")
+
+common.ids = intersect(colnames(pb.logcounts), meta.data$Internal_ID)
+pb.logcounts = pb.logcounts[, common.ids]
+metadata(pb.logcounts)$n_cells = metadata(pb.logcounts)$n_cells[, common.ids]
+
+colData(pb.logcounts) = cbind(colData(pb.logcounts), meta.data)
+
+```
+
+# Filter samples
+```{r}
+ncells = metadata(pb.logcounts)$n_cells
+
+mask = (fast_column_sums(ncells) > 100)
+pb.logcounts.filtered = pb.logcounts[, mask]
+metadata(pb.logcounts.filtered)$n_cells = metadata(pb.logcounts.filtered)$n_cells[, mask]
+
+meta.filtered = meta.data[match(colnames(pb.logcounts.filtered), meta.data$ID), ]
+colData(pb.logcounts.filtered) = cbind(colData(pb.logcounts.filtered), DataFrame(meta.filtered))
+
+```
+
+
+```{r}
+# Muscat analysis: two cohorts
+require(muscat)
+require(edgeR)
+require(limma)
+
+form = ~ Phenotype + Batch + Gender + Age + PMI + Benzodiazepines + Anticonvulsants + AntipsychTyp + AntipsychAtyp + Antidepress
+
+resDE = lapply( levels(pb.logcounts.filtered$Cohort), function(chrt){
+
+	keep.ids = colnames(pb.logcounts.filtered)[pb.logcounts.filtered$Cohort == chrt]
+
+	pb.logcounts.filtered_sub = pb.logcounts.filtered[,keep.ids]
+	metadata(pb.logcounts.filtered_sub)$n_cells = metadata(pb.logcounts.filtered_sub)$n_cells[,keep.ids]
+
+	design.mat <- model.matrix(form, data = droplevels(colData(pb.logcounts.filtered_sub)))
+
+	colnames(design.mat)[1] = c("Intercept")
+
+	contrast.mat <- makeContrasts(contrasts = "PhenotypeSZ", levels = design.mat)
+
+	pbDS(pb.logcounts.filtered_sub, method = "limma-trend", min_cells = 5, design = design.mat, contrast =  contrast.mat, filter = "gene")
+})
+names(resDE) = levels(colData(pb.logcounts.filtered)$Cohort)
+
+readr::write_rds(resDE, "~/PFC_v3/filtered_resDE_subtypes.rds")
+
+
+```
+
+```{r}
+celltypes = intersect(names(resDE$McLean$table$PhenotypeSZ), names(resDE$MtSinai$table$PhenotypeSZ))
+
+filtered.tables = lapply(celltypes, function(celltype) {
+  tbl1 = resDE[[1]]$table$PhenotypeSZ[[celltype]]
+  tbl2 = resDE[[2]]$table$PhenotypeSZ[[celltype]]
+  
+  genes = intersect(tbl1$gene[1 <= abs(tbl1$logFC/sd(tbl1$logFC))], tbl2$gene[1 <= abs(tbl2$logFC / sd(tbl2$logFC))])
+  
+  tbl1 = tbl1[match(genes, tbl1$gene), ]
+  tbl2 = tbl2[match(genes, tbl2$gene), ]
+  
+  mask = sign(tbl1$logFC)*sign(tbl2$logFC) > 0
+  tbl1 = tbl1[mask, ]
+  tbl2 = tbl2[mask, ]
+  
+  tbls = list(McClean = tbl1, MtSinai = tbl2) 
+  tbls = lapply( tbls, function(tab){
+    tab$se = tab$logFC / tab$t
+    tab
+  })
+  
+  return(tbls)
+})
+names(filtered.tables) = celltypes
+
+readr::write_rds(filtered.tables, "~/PFC_v3/individual_diff_results_filtered_subtypes.rds")
+
+```
+
+
+
+## Export as excel tables
+```{r}
+for(ds in 1:2) {
+
+  library(openxlsx)
+  Up.wb <- createWorkbook()
+  for(i in 1:length(tbls)) {
+    res = filtered.tables[[i]][[ds]]
+    res = res[res$logFC > 0, ]
+    res = cbind(data.frame(Gene = rownames(res)), res)
+    res = res[order(res$t, decreasing = T), ]
+  
+    n = names(filtered.tables)[[i]] #str_replace(arch.names[arch.order[i]], "/", "-")
+    
+    addWorksheet(wb=Up.wb, sheetName = n)
+    writeData(Up.wb, sheet = n, res) 
+  
+  }
+  saveWorkbook(Up.wb, sprintf("~/PFC_v3/DE_genes_up_%s_subtype.xlsx", names(filtered.tables[[i]])[[ds]]), overwrite = TRUE)
+  
+  library(openxlsx)
+  Down.wb <- createWorkbook()
+  for(i in 1:length(tbls)) {
+    res = filtered.tables[[i]][[ds]]
+    res = res[res$logFC < 0, ]
+    res = cbind(data.frame(Gene = rownames(res)), res)
+    res = res[order(res$t, decreasing = F), ]
+    
+    n = names(filtered.tables)[[i]] #str_replace(arch.names[arch.order[i]], "/", "-")
+    
+    addWorksheet(wb=Down.wb, sheetName = n)
+    writeData(Down.wb, sheet = n, res) 
+  
+  }
+  saveWorkbook(Down.wb, sprintf("~/PFC_v3/DE_genes_down_%s_subtype.xlsx", names(filtered.tables[[i]])[[ds]]), overwrite = TRUE)
+}
+
+
+
+```
+
+
+```{r}
+combined.analysis.tables = lapply(names(filtered.tables), function(celltype) {
+  print(celltype)
+  tbls = filtered.tables[[celltype]]
+  
+  gene.tbls = lapply(1:nrow(tbls[[1]]), function(i) {
+    dfs = lapply(1:length(tbls), function(k) tbls[[k]][i, ])
+    df = do.call("rbind", dfs)
+  })
+  names(gene.tbls) = tbls[[1]]$gene
+    
+  combined.analysis.tbl = do.call(rbind, lapply(names(gene.tbls), function(gene){
+    x = suppressWarnings(metafor::rma(yi=logFC, sei=se, data = gene.tbls[[gene]], method="FE"))
+    combined.tbl = data.frame( gene = gene, 
+        logFC     = x$beta,
+        se        = x$se,
+        tstat = x$zval,
+        P.Value   = x$pval)
+    return(combined.tbl)
+  }))
+  rownames(combined.analysis.tbl) = names(gene.tbls)
+  
+  combined.analysis.tbl = combined.analysis.tbl[order(combined.analysis.tbl$P.Value), ]
+  
+  return(combined.analysis.tbl)
+})
+names(combined.analysis.tables) = names(filtered.tables)
+
+DF = do.call(rbind, combined.analysis.tables)
+DF$adj.P.Val = p.adjust(DF$P.Value, "fdr")
+combined.analysis.tables = split(DF, unlist(lapply(names(combined.analysis.tables), function(celltype) rep(celltype, nrow(combined.analysis.tables[[celltype]])))))
+
+readr::write_rds(combined.analysis.tables, "~/PFC_v3/meta_analysis_diff_results_subtypes.rds")
+
+```
+
+```{r}
+resDE = readr::read_rds("~/PFC_v3/filtered_resDE.rds")
+
+filtered.tables = readr::read_rds("~/PFC_v3/individual_diff_results_filtered.rds")
+
+combined.analysis.tables = readr::read_rds("~/PFC_v3/meta_analysis_diff_results.rds")
+
+```
+
+```{r}
+  library(openxlsx)
+  Up.wb <- createWorkbook()
+  for(i in 1:length(combined.analysis.tables)) {
+    res = combined.analysis.tables[[i]]
+    res = res[(res$logFC > 0.1) & (res$P.Value <= 0.05), ]
+    res = res[order(res$t, decreasing = T), ]
+  
+    n = names(combined.analysis.tables)[[i]] #str_replace(arch.names[arch.order[i]], "/", "-")
+    
+    addWorksheet(wb=Up.wb, sheetName = n)
+    writeData(Up.wb, sheet = n, res) 
+  
+  }
+  saveWorkbook(Up.wb, sprintf("~/PFC_v3/DE_genes_up_%s_subtype.xlsx", "combined"), overwrite = TRUE)
+  
+  
+  library(openxlsx)
+  Down.wb <- createWorkbook()
+  for(i in 1:length(combined.analysis.tables)) {
+    res = combined.analysis.tables[[i]]
+    res = res[(res$logFC < -0.1) & (res$P.Value <= 0.05), ]
+    res = res[order(res$t, decreasing = F), ]
+    
+    n = names(combined.analysis.tables)[[i]] #str_replace(arch.names[arch.order[i]], "/", "-")
+    
+    addWorksheet(wb=Down.wb, sheetName = n)
+    writeData(Down.wb, sheet = n, res) 
+  
+  }
+  saveWorkbook(Down.wb, sprintf("~/PFC_v3/DE_genes_down_%s_subtype.xlsx", "combined"), overwrite = TRUE)
+```
+
+
+
+
+```{r}
+DE.sc = matrix(0, nrow(pb.logcounts), length(combined.analysis.tables))
+tstats = matrix(0, nrow(pb.logcounts), length(combined.analysis.tables))
+logFC = matrix(0, nrow(pb.logcounts), length(combined.analysis.tables))
+logPvals = matrix(0, nrow(pb.logcounts), length(combined.analysis.tables))
+rownames(DE.sc) = rownames(tstats) = rownames(logFC) = rownames(logPvals) = rownames(pb.logcounts)
+colnames(DE.sc) = colnames(tstats) = colnames(logFC) = colnames(logPvals) = names(combined.analysis.tables)
+
+limma_trend_mean.scores = matrix(0, nrow(pb.logcounts), length(combined.analysis.tables))
+Up.genes = vector("list", length(combined.analysis.tables))
+Down.genes = vector("list", length(combined.analysis.tables))
+rownames(limma_trend_mean.scores) = rownames(pb.logcounts)
+names(Up.genes) = names(Down.genes) = colnames(limma_trend_mean.scores) = names(combined.analysis.tables)
+for(i in 1:length(combined.analysis.tables)) {
+	print(i)
+	
+	tbl = combined.analysis.tables[[i]]
+
+	tstats[tbl$gene, names(combined.analysis.tables)[[i]]] = tbl$tstat
+	logFC[tbl$gene, names(combined.analysis.tables)[[i]]] = tbl$logFC
+	logPvals[tbl$gene, names(combined.analysis.tables)[[i]]] = -log10(tbl$adj.P.Val)
+	
+	DE.sc[tbl$gene, names(combined.analysis.tables)[[i]]] = tbl$tstat
+	
+}
+limma_trend_mean.scores[is.na(limma_trend_mean.scores)] = 0
+
+
+Up.genes = lapply(combined.analysis.tables, function(combined.analysis.tbl) {
+  combined.analysis.tbl$gene[(combined.analysis.tbl$logFC > 0.1) & (combined.analysis.tbl$adj.P.Val < 0.05)]
+})
+Down.genes = lapply(combined.analysis.tables, function(combined.analysis.tbl) {
+  combined.analysis.tbl$gene[(combined.analysis.tbl$logFC < -0.1) & (combined.analysis.tbl$adj.P.Val < 0.05)]
+})
+
+DE.new = list(DE.sc = DE.sc, tstats = tstats, logFC = logFC, logPvals = logPvals, Up.genes = Up.genes, Down.genes = Down.genes)
+saveRDS(DE.new, "~/PFC_v3/DE_genes_pseudobulk_final_subtypes.rds")
+
+
+```
+
+```{r}
+DE.new.full = readRDS("~/PFC_v3/DE_genes_pseudobulk_final.rds")
+
+
+CC = cor(DE.new.full$DE.sc, DE.new$DE.sc)
+ComplexHeatmap::Heatmap(CC)
+
+```
+```{r}
+ALS.DEs = read.table("~/als/MAGMA_DEG_input.tsv", sep = "\t")
+
+suppressWarnings(ids <- AnnotationDbi::mapIds(org.Hs.eg.db, keys = ALS.DEs$V2, keytype = "ENSEMBL", column = "SYMBOL", multiVals = "first"))
+ids[is.na(ids)] = ""
+ids = as.character(ids)
+
+ALS.genes = split(ids, ALS.DEs$V1)
+X = do.call(cbind, lapply(ALS.genes, function(gs) as.numeric(rownames(variant_gene_scores) %in% gs)))
+rownames(X) = rownames(variant_gene_scores)
+
+
+# gg = apply(variant_gene_scores, 2, function(x) rownames(X)[scale(x) > 1])
+
+
+EN = assess.geneset.enrichment.from.scores(variant_gene_scores, as(X, "sparseMatrix"))
+logPvals = EN$logPvals
+colnames(logPvals) = colnames(variant_gene_scores)
+
+
+  require(ComplexHeatmap)
+  pdf("~/als/MAGMA.pdf", height = 48)
+Heatmap(logPvals)
+  dev.off()
+
+```
+
+```{r}
+dl = list.dirs(file.path(MAGMA.path, "hmagma"), full.names = F, recursive = F)
+
+
+  pvals =   
+  lapply(dl, function(cond) {
+    print(cond)
+    file.name = sprintf("%s/%s_%s.gsa.out", MAGMA.path, cond, d)
+    lines = readLines(con <- file(file.name))
+    lines = str_split(lines, "\n")[-c(1:5)]
+    
+    pvals = sapply(lines, function(ll) {
+      parts = str_split(ll, " ")
+      as.numeric(parts[[1]][length(parts[[1]])-1])
+    })
+    
+    names(pvals) = sapply(lines, function(ll) {
+      parts = str_split(ll, " ")
+      parts[[1]][length(parts[[1]])]
+    })
+    
+    return(pvals)
+  })
+  names(pvals) = dl
+  
+  xx = sort(unique(Reduce("intersect", sapply(pvals, names))))
+
+  Res = -log10(do.call(cbind, lapply(pvals, function(x) x[xx])))
+
+  require(ComplexHeatmap)
+  pdf("~/als/MAGMA.pdf", height = 48)
+  ComplexHeatmap::Heatmap(Res[, -5], rect_gp = gpar(col = "black"))
+  dev.off()
+  
+```
+
+
+```{r}
+In.ace = readr::read_rds("~/PFC_v3/In_annotated_subACTIONet.rds")
+
+plot.ACTIONet(In.ace, In.ace$Labels.final)
+
+```
+
+```{r}
+visualize.markers(In.ace, c("CALB1", "CALB2", "CUX2", "NOS1", "NPY"))
+
+```
+
+
+```{r}
+# Rosehip
+# VIP
+# REELIN
+# 
+# PV-Basker
+# PV-Chan
+# SST
+
+```
+
+
+```{r}
+cell.annots = readr::read_rds("~/PFC_v3/SZ_cell_meta.rds")
+idx = match(colnames(In.ace), rownames(cell.annots))
+
+archs = cell.annots$assigned_archetype[idx]
+
+
+plot.ACTIONet(In.ace, In.ace$Labels.final)
+plot.ACTIONet(In.ace, archs)
+
+
+In.ace = rerun.archetype.aggregation(In.ace)
+
+cl = ACTIONet::Leiden.clustering(In.ace, 0.25)
+
+plot.ACTIONet(In.ace, In.ace$assigned_archetype)
+plot.ACTIONet(In.ace, cl)
+
+
+
+
+```
+```{r}
+In.markers.sebastian = list(In.SST_ADAMTS19 = c("GRIK1", "KIF26B", "SYNPR", "XKR4", "KIAA1217", "GRIP1", "THSD7A", "COL25A1", "ROBO2", "RBMS3", "TENM3", "ZNF385D", "TENM1", "GRIK3", "NXPH1", "BCL11A", "SOX6", "NETO2", "SHISA6", "DAB1", "PIP5K1B", "CDH12", "PCDH11X", "GRIK2", "CDH7", "SLC24A3", "ADAMTS19", "PACRG", "CDH9"), In.SST_BRINP3 = c("THSD7B", "FBN2", "TRHDE", "SAMD5", "GRIN3A", "SYNPR", "BRINP3", "NPAS1", "SLIT2", "PAWR", "PLCH1", "RAB3C", "GPC6", "GRM1", "PTCHD4", "NXPH1", "KCNMB2", "KIAA1217", "C8orf34", "ZNF385D", "NDST4", "XKR4", "PTPRM", "PAM", "FLT3", "PCDH11X", "GRIK1", "NETO1", "RUNX1T1"), In.SST_GALNT14 = c("TRHDE", "GRIK1", "SYNPR", "SHISA6", "XKR4", "GALNT14", "PCDH11X", "KIAA1217", "GRIN3A", "TENM3", "SAMD5", "GRIP1", "NETO1", "COL19A1", "GRIK3", "COL25A1", "ELAVL2", "KIF26B", "KCNMB2", "PLCH1", "CDH9", "ROBO2", "PAM", "NXPH1", "ADCY8", "TSHZ3", "RAB3C", "GRIK2", "GRM1"), In.SST_NPY = c("NPY", "NOS1", "TACR1", "SST", "IL1RAPL2", "MPPED2", "GRIK1", "LRP8", "CHRM2", "CORT", "CRHBP", "AFF2", "SOX6", "THSD4", "TMTC1", "NXPH2", "GULP1", "PAM", "MARCHF4", "SVIL", "BCL11A", "TRPC6", "ARHGAP28", "BCL11B", "COL24A1", "TENT5A", "NHS", "SCN9A", "KLF5"))
+
+annot.me = annotate.cells.using.markers(In.ace, In.markers.sebastian)
+
+plot.ACTIONet.gradient(In.ace, annot.me$Enrichment[, 1])
+plot.ACTIONet.gradient(In.ace, annot.me$Enrichment[, 2])
+plot.ACTIONet.gradient(In.ace, annot.me$Enrichment[, 3])
+plot.ACTIONet.gradient(In.ace, annot.me$Enrichment[, 4])
+
+visualize.markers(In.ace, c("HPGD", "FBN2"))
+
+
+```
+
+```{r}
+epi_annot = readr::read_rds("~/PFC_v3/epilepsy_paper_cell_annot.rds")
+epi_markers = readr::read_rds("~/PFC_v3/epilepsy_paper_markers.rds")
+
+In.cell.annot = annotate.cells.using.markers(In.ace, epi_markers[20:48])
+
+cc = grep("Sst", colnames(In.cell.annot$Enrichment))
+sapply(cc, function(i) {
+  plot(plot.ACTIONet.gradient(In.ace, x = In.cell.annot$Enrichment[, i], alpha_val = 0)+ggtitle(colnames(In.cell.annot$Enrichment)[[i]]))
+})
+
+
+plot.ACTIONet(In.ace, In.cell.annot$Label)
+
+```
+```{r}
+
+```
+
+
+```{r}
+cell.annots = readr::read_rds("~/PFC_v3/SZ_cell_meta.rds")
+idx = match(colnames(In.ace), rownames(cell.annots))
+
+# colnames(epi_annot$Enrichment)
+
+cts = epi_annot$Label[idx]
+
+
+plot.ACTIONet(In.ace, In.ace$Labels.final)
+plot.ACTIONet(In.ace, cts)
+
+```
+```{r}
+spec = readr::read_rds("~/PFC_v3/SZ_arch_gene_spec.rds")
+SST.archs = spec[, c(16, 21, 25)]
+
+plot.top.k.features(SST.archs, top_features = 10)
+
+```
+
+```{r}
+annotate.profile.using.markers <- function (feature.scores, marker.genes, rand.sample.no = 1000) 
+{
+    if (is.matrix(marker.genes) | is.sparseMatrix(marker.genes)) {
+        marker.genes = apply(marker.genes, 2, function(x) rownames(marker.genes)[x > 
+            0])
+    }
+    specificity.panel = feature.scores
+    GS.names = names(marker.genes)
+    if (is.null(GS.names)) {
+        GS.names = sapply(1:length(GS.names), function(i) sprintf("Celltype %s", 
+            i))
+    }
+    markers.table = do.call(rbind, lapply(names(marker.genes), 
+        function(celltype) {
+            genes = marker.genes[[celltype]]
+            if (length(genes) == 0) {
+                err = sprintf("No markers left.\n")
+                stop(err, call. = FALSE)
+            }
+            signed.count = sum(sapply(genes, function(gene) grepl("\\+$|-$", 
+                gene)))
+            is.signed = signed.count > 0
+            if (!is.signed) {
+                df = data.frame(Gene = genes, Direction = +1, 
+                  Celltype = celltype, stringsAsFactors = FALSE)
+            }
+            else {
+                pos.genes = (as.character(sapply(genes[grepl("+", 
+                  genes, fixed = TRUE)], function(gene) stringr::str_replace(gene, 
+                  stringr::fixed("+"), ""))))
+                neg.genes = (as.character(sapply(genes[grepl("-", 
+                  genes, fixed = TRUE)], function(gene) stringr::str_replace(gene, 
+                  stringr::fixed("-"), ""))))
+                df = data.frame(Gene = c(pos.genes, neg.genes), 
+                  Direction = c(rep(+1, length(pos.genes)), rep(-1, 
+                    length(neg.genes))), Celltype = celltype, 
+                  stringsAsFactors = FALSE)
+            }
+        }))
+    markers.table = markers.table[markers.table$Gene %in% rownames(specificity.panel), 
+        ]
+    if (dim(markers.table)[1] == 0) {
+        err = sprintf("No markers left.\n")
+        stop(err, call. = FALSE)
+    }
+    specificity.panel = specificity.panel[, ]
+    IDX = split(1:dim(markers.table)[1], markers.table$Celltype)
+    print("Computing significance scores")
+    set.seed(0)
+    Z = sapply(IDX, function(idx) {
+        markers = (as.character(markers.table$Gene[idx]))
+        directions = markers.table$Direction[idx]
+        mask = markers %in% colnames(specificity.panel)
+        A = as.matrix(specificity.panel[, markers[mask]])
+        sgn = as.numeric(directions[mask])
+        stat = A %*% sgn
+        rand.stats = sapply(1:rand.sample.no, function(i) {
+            rand.samples = sample.int(dim(specificity.panel)[2], 
+                sum(mask))
+            rand.A = as.matrix(specificity.panel[, rand.samples])
+            rand.stat = rand.A %*% sgn
+        })
+        cell.zscores = as.numeric((stat - apply(rand.stats, 1, 
+            mean))/apply(rand.stats, 1, sd))
+        return(cell.zscores)
+    })
+    Z[is.na(Z)] = 0
+    Labels = colnames(Z)[apply(Z, 1, which.max)]
+    Labels.conf = apply(Z, 1, max)
+    names(Labels) = rownames(specificity.panel)
+    names(Labels.conf) = rownames(specificity.panel)
+    rownames(Z) = rownames(specificity.panel)
+    out = list(Label = Labels, Confidence = Labels.conf, Enrichment = Z)
+    return(out)
+}
+```
+
+```{r}
+layers = readr::read_rds("~/PFC_v3/aux_data/Yao_layer_marker.RDS")
+
+DE = annotate.profile.using.markers(t(spec), layers)
+
+Heatmap(DE$Enrichment[c(16, 21, 25), -7])
+
+
+
+```
+
+```{r}
+data("curatedMarkers_human")
+curatedMarkers_human$Brain$PFC$Velmeshev2019$marker.genes
+
+```
+
+```{r}
+Ast.markers = list(Astrocyte.IL_VP = c("ADGRV1", "GLIS3", "GFAP", "ARHGEF4", "RFX4", "PITPNC1", "SORBS1", "DCLK2", "DPP10", "AQP4", "ABLIM1", "RYR3", "KCNN3", "ADCY2", "PRKG1", "AHCYL1", "WDR49", "FAM189A2", "RNF19A", "DTNA", "NEBL", "WWC1", "DOCK7", "PARD3", "RGMA", "CD44", "MSI2", "GPC5", "ADGRA3"), Astrocyte.PP
+= c("SLC1A2", "ADGRV1", "GPC5", "SLC4A4", "PITPNC1", "RYR3", "ZNRF3", "CABLES1", "ATP1A2", "SLC1A3", "TPD52L1", "TRPM3", "SFXN5", "ZNF98", "COL5A3", "SHROOM3", "NKAIN3", "HPSE2", "RFX4", "GLIS3", "BMPR1B", "AHCYL1", "AHCYL2", "CARMIL1", "PARD3", "MSI2", "CACHD1", "ABLIM1", "GPM6A"))
+
+
+Ast.DE = annotate.profile.using.markers(t(spec), Ast.markers)
+
+Heatmap(Ast.DE$Enrichment)
+
+```
+```{r}
+Velmeshev = read.table("~/Velmeshev.csv", sep = "\t", header = T)
+mm = split(Velmeshev$Gene.name, Velmeshev$Cell.type)
+
+
+Ast.DE = annotate.profile.using.markers(t(spec), mm)
+
+Heatmap(Ast.DE$Enrichment)
+
+
+```
+

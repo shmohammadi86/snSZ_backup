@@ -1,0 +1,853 @@
+---
+title: "ChEA Analyze of DE genes"
+output: html_notebook
+---
+
+# Setup
+```{r include=FALSE}
+require(ACTIONet)
+require(stringr)
+require(ComplexHeatmap)
+
+
+dataset.path = "~/results/datasets/"
+results.path = "~/results"
+figures.folder = "~/results/figures"
+input.folder = "~/results/input"
+
+
+```
+
+
+## Enrichment function
+```{r}
+assess.genesets <-function (arch.gs, terms.gs, N, min.pval = 1e-100, correct = "none"){
+    shared = t(sapply(terms.gs, function(gs1) {
+        sapply(arch.gs, function(gs2) {
+            nn = intersect(gs1, gs2)
+        })
+    }))
+    colnames(shared) = names(arch.gs)
+    GS.sizes = sapply(terms.gs, length)
+    logPvals.out = sapply(1:ncol(shared), function(i) {
+        gg = shared[, i]
+        x = as.numeric(sapply(gg, length))
+        n.sample = length(arch.gs[[i]])
+        n.success = as.numeric(GS.sizes)
+        v = rep(1, length(x))
+        min.overlap = n.success * n.sample/N
+        idx = which(x >= min.overlap)
+        if (length(idx) == 0) 
+            return(v)
+        v[idx] = (phyper(x[idx]-1, n.sample, N-n.sample, n.success[idx], lower.tail = F))
+        # v[idx] = HGT_tail(population.size = N, success.count = n.success[idx], 
+        #     sample.size = n.sample, observed.success = x[idx])
+        return(v)
+    })
+    if(correct == "global") {
+      logPvals.out = matrix(p.adjust(logPvals.out, "fdr"), nrow = nrow(logPvals.out))
+    } else if(correct == "local") {
+      logPvals.out = apply(logPvals.out, 2, function(x) p.adjust(x, "fdr"))
+    }
+    rownames(logPvals.out) = names(terms.gs)
+    colnames(logPvals.out) = names(arch.gs)
+    return(-log10(Matrix::t(logPvals.out)))
+}
+```
+
+# Load primary datasets
+```{r, eval = T}
+ACTIONet_summary = readr::read_rds(file.path(dataset.path, "ACTIONet_summary_filtered_individuals.rds"))
+
+pb.logcounts = readr::read_rds(file.path(dataset.path, "PB_mean_logcounts_final.RDS"))
+
+color.df = readRDS(file.path(dataset.path, "celltype_colors.rds"))
+
+colors = color.df$color
+names(colors) = color.df$celltype
+
+```
+
+# Load DE results
+```{r, eval = F}
+resDE = readr::read_rds(file.path(dataset.path, "Cohort_specific_DE_results_final_with_logumi_baseline_full_filter_extended_cell_filtering.rds"))
+
+filtered.tables = readr::read_rds(file.path(dataset.path, "individual_diff_results_filtered_full_with_logumi_baseline_full_filter_extended_cell_filtering.rds"))
+
+DE.new = readRDS(file.path(dataset.path, "DE_genes_pseudobulk_final_with_logumi_baseline_full_filter_extended_cell_filtering.rds"))
+
+Up.genes = DE.new$Up.genes
+Down.genes = DE.new$Down.genes
+
+```
+
+
+
+
+## Use ChEA3 REST API
+```{r}
+library(httr)
+library(jsonlite)
+
+queryChEA3 <- function(genes, url = "https://maayanlab.cloud/chea3/api/enrich/") {
+
+  encode = "json"
+  payload = list(query_name = "myQuery", gene_set = genes)
+  
+  #POST to ChEA3 server
+  response = POST(url = url, body = payload, encode = encode)
+  json = content(response, "text")
+  
+  #results as list of R dataframes
+  results = fromJSON(json)
+}
+
+
+ChEA3.Up = lapply(Up.genes, function(genes) {
+  if(length(genes) > 10)
+    queryChEA3(genes)
+})
+
+ChEA3.Down = lapply(Down.genes, function(genes) {
+  if(length(genes) > 10)
+    queryChEA3(genes)
+})
+
+
+names(ChEA3.Up) = paste("Up", names(Up.genes), sep = "_")
+names(ChEA3.Down) = paste("Down", names(Down.genes), sep = "_")
+
+ChEA.analysis = c(ChEA3.Up, ChEA3.Down)
+saveRDS(ChEA.analysis, file = file.path(dataset.path, "ChEA_DE_TF_enrichment_meta_filtered_with_logumi_baseline_full_filter_extended_cell_filtering.RDS"))
+# 
+# X = readRDS("~/PFC_v3/ChEA_DE_TF_enrichment_meta_filtered.RDS")
+
+
+
+```
+
+
+```{r}
+ChEA.analysis = readRDS(file.path(dataset.path, "ChEA_DE_TF_enrichment_meta_filtered_with_logumi_baseline_full_filter_extended_cell_filtering.RDS"))
+
+ChEA3.Up = ChEA.analysis[grep("Up", names(ChEA.analysis))]
+ChEA3.Down = ChEA.analysis[grep("Down", names(ChEA.analysis))]
+
+names(ChEA3.Up) = names(ChEA3.Down) = names(Up.genes)
+
+
+```
+
+
+## Export as excel tables
+```{r}
+library(openxlsx)
+Up.wb <- createWorkbook()
+for(i in 1:length(ChEA3.Up)) {
+  res = ChEA.analysis[[i]]
+  if(is.null(res)) {
+      next
+  }
+  
+  X = res$`Integrated--topRank`
+  
+  X$Score = -log10(as.numeric(X$Score))
+  X$Rank = as.numeric(X$Rank)
+  X = X[, -c(1, 2, 5)]
+  
+  # X$hasGWAS = as.numeric(X$TF %in% SZ.genes$`GWAS (Pardiñas)`)
+  # X$hasDenovo = as.numeric(X$TF %in% SZ.genes$`De Novo`)
+  # 
+  
+  n = names(ChEA3.Up)[[i]] #str_replace(arch.names[arch.order[i]], "/", "-")
+
+  addWorksheet(wb=Up.wb, sheetName = n)
+  writeData(Up.wb, sheet = n, X) 
+
+}
+
+saveWorkbook(Up.wb, file.path(dataset.path, "Enriched_TFs_Up_topRank_meta_filtered_with_logumi_baseline_full_filter_extended_cell_filtering.xlsx"), overwrite = TRUE)
+
+
+library(openxlsx)
+Down.wb <- createWorkbook()
+for(i in (length(ChEA3.Up)+1):(length(ChEA3.Up)+length(ChEA3.Down))) {
+  res = ChEA.analysis[[i]]
+  if(is.null(res)) {
+      next
+  }
+  
+  X = res$`Integrated--topRank`
+  
+  X$Score = -log10(as.numeric(X$Score))
+  X$Rank = as.numeric(X$Rank)
+  X = X[, -c(1, 2, 5)]
+  
+  # X$hasGWAS = as.numeric(X$TF %in% SZ.genes$`GWAS (Pardiñas)`)
+  # X$hasDenovo = as.numeric(X$TF %in% SZ.genes$`De Novo`)
+  # 
+  
+  n = names(ChEA3.Down)[[i-length(ChEA3.Up)]] #str_replace(arch.names[arch.order[i]], "/", "-")
+  
+  addWorksheet(wb=Down.wb, sheetName = n)
+  writeData(Down.wb, sheet = n, X) 
+
+}
+
+saveWorkbook(Down.wb, file.path(dataset.path, "Enriched_TFs_Down_topRank_meta_filtered_with_logumi_baseline_full_filter_extended_cell_filtering.xlsx"), overwrite = TRUE)
+
+
+```
+
+
+```{r}
+TFs = sort(unique(ChEA.analysis$Up_Ast$`Integrated--topRank`$TF))
+
+
+TF.up = matrix(0, nrow = length(TFs), length(ChEA3.Up))
+rownames(TF.up) = TFs
+colnames(TF.up) = names(ChEA3.Up)
+for(i in 1:length(ChEA3.Up)) {
+  res = ChEA.analysis[[i]]
+  if(is.null(res)) {
+      next
+  }
+  
+  X = res$`Integrated--topRank`
+  
+  TF.up[match(X$TF, TFs), i] = -log10(as.numeric(X$Score))
+}
+
+
+
+
+TF.down = matrix(0, nrow = length(TFs), length(ChEA3.Down))
+rownames(TF.down) = TFs
+colnames(TF.down) = names(ChEA3.Down)
+for(i in (length(ChEA3.Up)+1):(length(ChEA3.Up)+length(ChEA3.Down))) {
+  res = ChEA.analysis[[i]]
+  if(is.null(res)) {
+      next
+  }
+  
+  X = res$`Integrated--topRank`
+  
+  TF.down[match(X$TF, TFs), i-length(ChEA3.Up)-1] = -log10(as.numeric(X$Score))
+}
+
+TFs = sort(unique(ChEA.analysis$Up_Ast$`Integrated--topRank`$TF))
+
+TF.mean.scores = apply(cbind(TF.down[, 1:17], TF.up[, 1:17]), 1, mean)
+names(TF.mean.scores) = rownames(TF.down)
+
+
+```
+
+
+
+## Load significant variants and mapped genes
+```{r}
+PGC3.loci = read.table(file.path(input.folder, "PGC3_SZ_significant_loci.csv"), sep = "\t", header = T)
+
+associated.genes = PGC3.loci$ENSEMBL.genes..all..clear.names.
+
+
+PGC3.all.genes.raw = sort(unique(unlist(sapply(PGC3.loci$ENSEMBL.genes..all..clear.names., function(str) {
+  if(str == "-") {
+    return("-")
+  }
+  gs = str_split(str, ",")[[1]]
+  
+  return(gs)
+}))))
+
+PGC3.all.genes = intersect(PGC3.all.genes.raw, rownames(pb.logcounts))
+
+
+
+```
+
+
+```{r}
+FunCat = readRDS("~/FunCat.rds")
+FunCat.genes = split(FunCat$FunCat2Gene$Gene, factor(FunCat$FunCat2Gene$Category, unique(FunCat$FunCat2Gene$Category)))[-15]
+names(FunCat.genes) = FunCat$FunCat2Class$Category
+
+FunCat.annotation = FunCat$FunCat2Class$Classification
+
+FunCatPal = ggpubr::get_palette("npg", length(unique(FunCat.annotation)))
+names(FunCatPal) = unique(FunCat.annotation)
+
+```
+
+
+```{r}
+ncells = sapply(int_colData(pb.logcounts)$n_cells, as.numeric)
+rownames(ncells) = names(assays(pb.logcounts))
+
+cs = Matrix::colSums(ncells)
+ncells.freq = 100*scale(ncells, center = F, scale = cs)
+Ex.perc = (fast_column_sums(ncells.freq[grepl("^Ex", rownames(ncells.freq)) & !grepl("^Ex-NRGN", rownames(ncells.freq)), ]))
+
+mask = (Ex.perc >= 10) & (Ex.perc <= 80) #& (fast_column_sums(ncells) >= 500)
+
+
+# mask = !(pb.logcounts$ID %in% c("SZ15"))
+# Samples that are depleted in Ex.perc:: 
+# # SZ15 0.2570694
+# # SZ3 2.8237585
+# # SZ24 3.7128713
+# # SZ29 7.5571178
+
+pb.logcounts.filtered = pb.logcounts [, mask]
+# metadata(pb.logcounts.filtered)$n_cells = metadata(pb.logcounts.filtered)$n_cells[, mask]
+```
+
+```{r}
+# cts = names(assays(pb.logcounts.filtered))
+cts = names(DE.new$Up.genes)
+# #cts = names(assays(pb.logcounts.filtered))
+cts = cts[grep("^Ex|^In", cts)]
+            
+subTFs = intersect(TFs, rownames(pb.logcounts))
+PB.logcounts.combined = lapply(cts, function(nn) {
+  print(nn)
+  E = assays(pb.logcounts.filtered)[[nn]]
+  cs = Matrix::colSums(E)
+  mask = (cs > 0)
+  E = E[, mask]
+  E = median(cs[mask])*scale(E, center = F, scale = cs[mask])
+  # E.orth = orthoProject(E, Matrix::rowMeans(E))
+  
+  CC = cor(Matrix::t(E[subTFs, ]), use = "p")
+  CC[is.na(CC)] = 0
+
+  return(CC)
+})
+CC.mean = Reduce("+", PB.logcounts.combined) / length(PB.logcounts.combined)
+
+```
+
+
+
+```{r}
+adj = CC.mean
+# data("PCNet")
+# adj[adj < 0] = 0
+# common.genes = intersect(rownames(PCNet), rownames(adj))
+# adj = adj[common.genes, common.genes] * PCNet[common.genes, common.genes]
+# adj = EnhAdj(adj)
+# rownames(adj) = colnames(adj) = common.genes
+
+cl = cluster.graph(adj, 0.1)
+cc = table(cl)
+TF.mods = split(rownames(adj), cl)
+TF.mods = TF.mods[as.numeric(names(cc)[cc>=5])]
+TF.mods = lapply(TF.mods, function(gs) sort(gs))
+
+perm = order(sapply(TF.mods, function(gs) mean(TF.mean.scores[gs])), decreasing = T)
+TF.mods = TF.mods[perm]
+
+names(TF.mods) = 1:length(TF.mods)
+
+# data("gProfilerDB_human")
+# BP = gProfilerDB_human$SYMBOL$`GO:BP`
+# cs = fast_column_sums(BP)
+# BP = BP[, (cs >= 10) & (cs <= 1000)]
+# BP.gs = apply(BP, 2, function(x) rownames(BP)[x > 0])
+
+FunCat.TFs = lapply(FunCat.genes, function(gs) intersect(TFs, gs))
+TF.enrichment = assess.genesets(FunCat.TFs, TF.mods, length(TFs), "local")
+TF.enrichment = TF.enrichment[, fast_column_sums(TF.enrichment) > 1]
+# Heatmap((TF.enrichment))
+
+Heatmap(doubleNorm(TF.enrichment))
+
+```
+
+```{r}
+
+
+
+
+
+
+# sorted.TFs = unlist(lapply(TF.mods, function(x) x[order(TF.mean.scores[x], decreasing = T]))
+
+
+# sorted.TFs = unlist(lapply(TF.mods[1:5], function(x) x[order(TF.mean.scores[x], decreasing = T)]))
+# 
+# mask = sorted.TFs %in% PGC3.all.genes
+# TF.colors = rep("black", length(sorted.TFs))
+# TF.colors[mask] = "red"
+# 
+# ww = CC.mean[sorted.TFs, sorted.TFs]
+# diag(ww) = NA
+# MPal = pals::brewer.dark2(5)
+# names(MPal) = paste("M", 1:5, sep = "")
+# ha_row = rowAnnotation(Module = factor(unlist(lapply(1:5, function(i) paste("M", rep(i, length(TF.mods[[i]])), sep = ""))), paste("M", 1:5, sep = "")), col = list(Module = MPal))
+# pdf(file.path(figures.folder, "TF_modules_top5_tmp.pdf"), width = 18, height = 12)
+# Heatmap(ww, row_names_side = "left", name = "Correlation", row_names_gp = gpar(col = TF.colors), column_title = "TF-TF expression correlation", column_title_gp = gpar(fontsize = 21), cluster_rows = F, cluster_columns = F, left_annotation = ha_row) + Heatmap(TF.up[sorted.TFs, ], rect_gp = gpar(col = "black"), cluster_columns = F, column_title = "Up", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.up)]), name = "Up") + Heatmap(TF.down[sorted.TFs, ], rect_gp = gpar(col = "black"), cluster_columns = F, column_title = "Down", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.down)]), name = "Down", row_names_side = "left")
+# dev.off()
+
+
+sorted.TFs = unlist(lapply(TF.mods, function(x) x[order(TF.mean.scores[x], decreasing = T)]))
+
+mask = sorted.TFs %in% PGC3.all.genes
+TF.colors = rep("black", length(sorted.TFs))
+TF.colors[mask] = "red"
+
+ww = CC.mean[sorted.TFs, sorted.TFs]
+diag(ww) = NA
+MPal = pals::polychrome(length(TF.mods))
+names(MPal) = paste("M", 1:length(TF.mods), sep = "")
+ha_row = rowAnnotation(Module = factor(unlist(lapply(1:length(TF.mods), function(i) paste("M", rep(i, length(TF.mods[[i]])), sep = ""))), paste("M", 1:length(TF.mods), sep = "")), col = list(Module = MPal))
+pdf(file.path(figures.folder, "TF_modules_all_tmp.pdf"), width = 42, height = 36)
+Heatmap(ww, row_names_side = "left", name = "Correlation", row_names_gp = gpar(col = TF.colors), column_title = "TF-TF expression correlation", column_title_gp = gpar(fontsize = 21), cluster_rows = F, cluster_columns = F, left_annotation = ha_row) + Heatmap(TF.up[sorted.TFs, ], rect_gp = gpar(col = "black"), cluster_columns = F, column_title = "Up", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.up)]), name = "Up") + Heatmap(TF.down[sorted.TFs, ], rect_gp = gpar(col = "black"), cluster_columns = F, column_title = "Down", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.down)]), name = "Down", row_names_side = "left")
+dev.off()
+
+
+
+
+```
+
+
+
+
+
+```{r}
+sorted.TFs = unlist(lapply(TF.mods[1:5], function(x) x[order(TF.mean.scores[x], decreasing = T)]))
+
+mask = sorted.TFs %in% PGC3.all.genes
+TF.colors = rep("black", length(sorted.TFs))
+TF.colors[mask] = "red"
+
+ww = CC.mean[sorted.TFs, sorted.TFs]
+diag(ww) = NA
+MPal = pals::brewer.dark2(5)
+names(MPal) = paste("M", 1:5, sep = "")
+ha_row = rowAnnotation(Module = factor(unlist(lapply(1:5, function(i) paste("M", rep(i, length(TF.mods[[i]])), sep = ""))), paste("M", 1:5, sep = "")), col = list(Module = MPal))
+pdf(file.path(figures.folder, "TF_modules_top5_neuro.pdf"), width = 18, height = 12)
+Heatmap(ww, row_names_side = "left", name = "Correlation", row_names_gp = gpar(col = TF.colors), column_title = "TF-TF expression correlation", column_title_gp = gpar(fontsize = 21), cluster_rows = F, cluster_columns = F, left_annotation = ha_row) + Heatmap(TF.up[sorted.TFs, 1:17], rect_gp = gpar(col = "black"), cluster_columns = F, column_title = "Up", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.up)]), name = "Up") + Heatmap(TF.down[sorted.TFs, 1:17], rect_gp = gpar(col = "black"), cluster_columns = F, column_title = "Down", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.down)]), name = "Down", row_names_side = "left")
+dev.off()
+
+
+sorted.TFs = unlist(lapply(TF.mods, function(x) x[order(TF.mean.scores[x], decreasing = T)]))
+
+mask = sorted.TFs %in% PGC3.all.genes
+TF.colors = rep("black", length(sorted.TFs))
+TF.colors[mask] = "red"
+
+ww = CC.mean[sorted.TFs, sorted.TFs]
+diag(ww) = NA
+MPal = pals::polychrome(length(TF.mods))
+names(MPal) = paste("M", 1:length(TF.mods), sep = "")
+ha_row = rowAnnotation(Module = factor(unlist(lapply(1:length(TF.mods), function(i) paste("M", rep(i, length(TF.mods[[i]])), sep = ""))), paste("M", 1:length(TF.mods), sep = "")), col = list(Module = MPal))
+pdf(file.path(figures.folder, "TF_modules_all_neuro.pdf"), width = 42, height = 36)
+Heatmap(ww, row_names_side = "left", name = "Correlation", row_names_gp = gpar(col = TF.colors), column_title = "TF-TF expression correlation", column_title_gp = gpar(fontsize = 21), cluster_rows = F, cluster_columns = F, left_annotation = ha_row) + Heatmap(TF.up[sorted.TFs, 1:17], rect_gp = gpar(col = "black"), cluster_columns = F, column_title = "Up", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.up)]), name = "Up") + Heatmap(TF.down[sorted.TFs, 1:17], rect_gp = gpar(col = "black"), cluster_columns = F, column_title = "Down", column_title_gp = gpar(fontsize = 21), column_names_gp = gpar(col = colors[colnames(TF.down)]), name = "Down", row_names_side = "left")
+dev.off()
+
+```
+
+
+```{r}
+
+
+sub.W = CC.mean[TF.mods[[1]], TF.mods[[1]]]
+diag(sub.W) = NA
+Heatmap(sub.W, col = blues9)
+
+Heatmap(as.matrix(TF.mean.scores[TF.mods[[1]]]), name = "Max ChEA score") + Heatmap(TF.up[TF.mods[[1]], ], rect_gp = gpar(col = "black"), cluster_columns = F, column_title = "Up", column_names_gp = gpar(col = colors[colnames(TF.up)]), name = "Up") + Heatmap(TF.down[TF.mods[[1]], ], rect_gp = gpar(col = "black"), cluster_columns = F, column_title = "Down", column_names_gp = gpar(col = colors[colnames(TF.down)]), name = "Down") + Heatmap(sub.W, cluster_columns = F, cluster_rows = F)
+
+
+D = (1 - CC.mean)/2
+require(NetLibR)
+pc.out = PCSF(as(D, "sparseMatrix"), TF.mean.scores, kappa = 1e-5)
+x = pc.out + t(pc.out)
+gg = graph_from_adjacency_matrix(x, mode = "undirected", weighted = T)
+components(gg)  
+
+
+W = abs(CC.mean)^6
+
+
+cl = cluster.graph(W)
+cc = table(cl)
+TF.mods = split(rownames(CC.mean), cl)
+TF.mods = TF.mods[as.numeric(names(cc)[cc>=5])]
+TF.mods[[1]]
+
+rownames(CC.mean)
+
+
+pdf("~/results/figures/TFs_avg.pdf", width = 21, height = 21)
+# Heatmap(abs(CC.mean)^6, rect_gp = gpar(col = "black"))
+Heatmap(CC.mean[neurodev.top.TFs, neurodev.top.TFs], rect_gp = gpar(col = "black"))
+dev.off()
+
+W = abs(CC.mean)^6
+
+pdf("~/results/figures/TFs_avg_full_ortho.pdf", width = 21, height = 21)
+Heatmap(CC.mean, show_row_dend = F, show_column_dend = F, show_row_names = F, show_column_names = F)
+dev.off()
+
+
+
+
+
+CC.mean[is.na(CC.mean)] = 0
+cl = cluster.graph(CC.mean)
+IDX = split(rownames(CC.mean), cl)
+
+
+PB.logcounts.combined = do.call(cbind, lapply(cts, function(nn) {
+  E = assays(pb.logcounts.filtered)[[nn]]
+  cs = Matrix::colSums(E)
+  mask = (cs > 0)
+  E = E[, mask]
+  E = median(cs[mask])*scale(E, center = F, scale = cs[mask])
+}))
+PB.logcounts.combined[is.na(PB.logcounts.combined)] = 0
+
+library(preprocessCore)
+# PB.logcounts.combined <- normalize.quantiles(PB.logcounts.combined, copy = TRUE)
+rownames(PB.logcounts.combined) = rownames(pb.logcounts.filtered)
+
+# CC = cor(Matrix::t(PB.logcounts.combined[neurodev.top.TFs, ]), use = "p")
+CC = abs(cor(Matrix::t(PB.logcounts.combined[neurodev.top.TFs, ]), use = "p"))^6
+# CC = EnhAdj(CC)
+# CC = EnhAdj(CC)
+# CC[abs(CC) < 0.5] = 0
+
+cl = cluster.graph(CC, resolution_parameter = 0.1)
+Regulons = sapply(split(neurodev.top.TFs, cl)[1:5], sort)
+print(Regulons)
+
+perm = get_order(seriate(as.dist(1-CC/(max(abs(CC)))), "OLO"))
+diag(CC) = NA
+
+pdf("~/PFC_v3/figures/regulons.pdf", width = 12, height = 12)
+Heatmap(CC[perm, perm], cluster_rows = F, cluster_columns = F)
+dev.off()
+
+
+SATB2.module = Regulons[[1]]
+
+```
+
+
+
+```{r}
+
+
+TGs.up = vector("list", length(TFs))
+names(TGs.up) = TFs
+
+for(i in 1:length(ChEA3.Up)) {
+  res = ChEA.analysis[[i]]
+  if(is.null(res)) {
+      next
+  }
+  
+  X = res$`Integrated--topRank`
+  for(j in 1:nrow(X)) {
+    TGs.up[[X$TF[[j]]]] = union(TGs.up[[X$TF[[j]]]], str_split(X$Overlapping_Genes[[j]], ",")[[1]])
+  }
+}
+
+gg = sapply(TGs.up, length)
+TGs.up = TGs.up[scale(gg) > 1]
+adj = assess.genesets(TGs.up, TGs.up, length(TFs))
+cl = cluster.graph(adj, 2)
+cc = table(cl)
+lapply(as.numeric(names(cc)[cc > 5]), function(i) sort(rownames(adj)[cl == i]))
+
+TF.down = matrix(0, nrow = length(TFs), length(ChEA3.Down))
+rownames(TF.down) = TFs
+colnames(TF.down) = names(ChEA3.Down)
+for(i in (length(ChEA3.Up)+1):(length(ChEA3.Up)+length(ChEA3.Down))) {
+  res = ChEA.analysis[[i]]
+  if(is.null(res)) {
+      next
+  }
+  
+  X = res$`Integrated--topRank`
+  
+  TF.down[match(X$TF, TFs), i-length(ChEA3.Up)-1] = -log10(as.numeric(X$Score))
+}
+```
+
+
+
+```{r}
+# GWAS.TFs = intersect(SZ.genes$`GWAS (Pardiñas)`, rownames(TF.down))
+GWAS.TFs = intersect(PGC3.all.genes, rownames(TF.down))
+
+Xd = TF.down[GWAS.TFs, grep("Ex", colnames(TF.down))]
+Xd[Xd < 2] = 0
+Xd = Xd[fast_row_sums(Xd) > 0, ]
+
+# Xd = (max(TF.down) - t(TF.down[GWAS.TFs, ]+1)) / (max(TF.down) - min(TF.down))
+# Xd = Xd[grep("Ex", rownames(Xd)), ]
+# pdf("~/PFC_v3/TF_GWAS_down_PGC3.pdf", width = 10, height = 4)
+Heatmap(Xd, rect_gp = gpar(col = "black"), name = "Enrichment")
+# dev.off()
+
+
+Xu = TF.up[GWAS.TFs, grep("Ex", colnames(TF.up))]
+Xu[Xu < 2] = 0
+Xu = Xu[fast_row_sums(Xu) > 0, ]
+# Xu = (max(TF.up) - t(TF.up[GWAS.TFs, ]+1)) / (max(TF.up) - min(TF.up))
+# Xu = Xu[grep("Ex", rownames(Xd)), ]
+# pdf("~/PFC_v3/TF_GWAS_up_PGC3.pdf", width = 10, height = 4)
+Heatmap(Xu, rect_gp = gpar(col = "black"), name = "Enrichment")
+# dev.off()
+
+
+selected.TFs = sort(unique(union(rownames(Xu), rownames(Xd))))
+
+
+```
+
+
+```{r}
+set.seed(0)
+GWAS.TFs = sort(unique(intersect(all.TFs, PGC3.all.genes)))
+# GWAS.TFs = intersect(all.TFs, PGC3.all.genes)
+
+TF.pvals = sapply(ChEA.analysis, function(tbl) {
+  if(is.null(tbl)) {
+    return(1)
+  }
+  TFs = tbl$`Integrated--topRank`$TF
+  # scores = -log10((as.numeric(tbl$`Integrated--topRank`$Score)))
+  # names(scores) = TFs
+  # 
+  # res = fgsea::fgsea(list(PGC3 = GWAS.TFs), scores)
+  # res$pval
+  
+  l = as.numeric(TFs %in% GWAS.TFs)
+  if(sum(l) < 5)
+    return (1)
+  mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l)/4, 10, upper_bound = F, tol = 1e-300)
+  mhg.out$pvalue
+})
+TF.pvals.corrected = p.adjust(TF.pvals, method = "fdr")
+TF.pvals.enrichment = -log10(TF.pvals.corrected)
+sort(TF.pvals.enrichment)
+
+
+
+selected.TFs = sapply(ChEA.analysis, function(tbl) {
+  if(is.null(tbl))
+    return (NULL)
+  TFs = tbl$`Integrated--topRank`$TF
+  l = as.numeric(TFs %in% GWAS.TFs)
+  mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l)/4, 10, upper_bound = F, tol = 1e-300)
+  TFs[1:mhg.out$threshold]
+
+  
+  # TFs = tbl$`Integrated--topRank`$TF
+  # scores = -log10((as.numeric(tbl$`Integrated--topRank`$Score)))
+  # names(scores) = TFs
+  # 
+  # res = fgsea::fgsea(list(PGC3 = GWAS.TFs), scores)
+  # res$leadingEdge[[1]]
+})
+
+sig.selected.TFs = selected.TFs[TF.pvals.corrected < 0.01]
+
+```
+
+
+```{r}
+
+
+df = data.frame(Celltype = c(colnames(DE.sc), colnames(DE.sc)), Enrichment = TF.pvals.enrichment, Direction = c(rep("Up", 20), rep("Down", 20)))
+df$Enrichment[21:40] = -df$Enrichment[21:40]
+
+perm = order(pmax(TF.pvals.enrichment[1:20], TF.pvals.enrichment[21:40]), decreasing = F)
+df$Celltype = factor(df$Celltype, df$Celltype[perm])
+
+pdf("~/PFC_v3/figures/TF_GWAS_enrichment.pdf", width = 8, height = 5)
+ggplot(data = df, aes(x = Celltype, y = Enrichment, fill = Direction)) + geom_bar(stat = "identity")+
+  coord_flip()+ylab("Sorted Celltypes")+
+labs(y = "Enrichment", x = "Sorted Celltypes")+
+  theme_minimal()+
+  guides(fill = FALSE)+ scale_fill_manual(values=c("#3288bd", "#d53e4f")) + theme(axis.text.y = element_text(face="bold", color=celltype.colors[levels(df$Celltype)], size=12, angle=0), axis.text.x = element_text(face="bold", color="black", size=12, angle=0), axis.title = element_text(face="bold", size=14, angle=0))
+dev.off()
+
+
+
+
+
+
+```
+
+```{r}
+# Top.Up.TFs.top50 = as.list(as.data.frame(apply(TF.up, 2, function(x) rownames(TF.up)[order(x, decreasing = T)[1:50]])))
+# Top.Down.TFs.top50 = as.list(as.data.frame(apply(TF.down, 2, function(x) rownames(TF.up)[order(x, decreasing = T)[1:50]])))
+
+# Top.Up.TFs.top50 = apply(TF.up, 2, function(x) rownames(TF.up)[x > -log10(0.05)])
+# Top.Down.TFs.top50 = apply(TF.down, 2, function(x) rownames(TF.down)[x > -log10(0.05)])
+
+
+Top.Up.TFs = sig.selected.TFs[grep("Up", names(sig.selected.TFs))]
+names(Top.Up.TFs)=sapply(names(Top.Up.TFs), function(x) substr(x, 4, str_length(x)))
+
+Top.Down.TFs = sig.selected.TFs[grep("Down", names(sig.selected.TFs))]
+names(Top.Down.TFs)=sapply(names(Top.Down.TFs), function(x) substr(x, 6, str_length(x)))
+
+FunCat.TFs = lapply(FunCat.genes, function(x) intersect(x, all.TFs))
+fun.Cat.TFs.up = assess.genesets(FunCat.TFs, Top.Up.TFs, length(all.TFs), correct = T)
+fun.Cat.TFs.down = assess.genesets(FunCat.TFs, Top.Down.TFs, length(all.TFs), correct = T)
+
+
+
+
+# fun.Cat.TFs.up = assess.genesets(FunCat.genes, Top.Up.TFs.top50, nrow(pb.logcounts))
+# fun.Cat.TFs.down = assess.genesets(FunCat.genes, Top.Down.TFs.top50, nrow(pb.logcounts))
+
+ha_rows = rowAnnotation(df = list("Class" = FunCat.annotation), col = list("Class" = FunCatPal), annotation_legend_param = list("Class"=list(title_gp = gpar(fontsize = 0), labels_gp = gpar(fontsize = 10))))
+
+
+X.U = (fun.Cat.TFs.up)
+# redCol_fun = circlize::colorRamp2(c(quantile(X.U, 0.25), quantile(X.U, 0.5), quantile(X.U, 0.85), quantile(X.U, 0.99)), c("#ffffff", "#fee5d9", "#ef3b2c", "#99000d"))
+X.U[X.U < -log10(0.05)] = 0
+redCol_fun = circlize::colorRamp2(seq(-log10(0.05), quantile(X.U, 0.95), length.out = 8), (c("#ffffff", pals::brewer.reds(7))))
+
+
+
+
+
+X.D = (fun.Cat.TFs.down)
+# blueCol_fun = circlize::colorRamp2(c(quantile(X.D, 0.25), quantile(X.U, 0.5), quantile(X.D, 0.85), quantile(X.D, 0.99)), c( "#ffffff", "#9ecae1", "#2171b5", "#08306b"))
+X.D[X.D < -log10(0.05)] = 0
+
+blueCol_fun = circlize::colorRamp2(seq(-log10(0.05), quantile(X.D, 0.95), length.out = 8), (c("#ffffff", pals::brewer.blues(7))))
+
+# pals::brewer.reds()
+
+
+pdf("~/PFC_v3/figures/TFs_FunCat_enrichment_meta_filtered_selected.pdf", width = 8, height = 7)
+par(mar=c(0,150,0,0))
+Heatmap(X.U, rect_gp = gpar(col = "black"), name = "Up", column_title = "Up", cluster_rows = F, cluster_columns = F, col = redCol_fun, row_names_side = "left",  column_names_gp = gpar(fontsize = 14, fontface="bold", col = colors[colnames(X.U)]), row_names_gp = gpar(fontsize = 14, fontface="bold", col = FunCatPal[FunCat.annotation]), column_title_gp = gpar(fontsize = 18, fontface="bold"), row_title_gp = gpar(fontsize = 18, fontface="bold"), row_names_max_width = unit(150, "cm"), column_names_max_height = unit(150, "cm"))+
+Heatmap(X.D, rect_gp = gpar(col = "black"), name = "Down", cluster_rows = F, cluster_columns = F, col = blueCol_fun, row_names_side = "left", column_title = "Down",  column_names_gp = gpar(fontsize = 14, fontface="bold", col = colors[colnames(X.D)]), row_names_gp = gpar(fontsize = 14, fontface="bold", col = FunCatPal[FunCat.annotation]), column_title_gp = gpar(fontsize = 18, fontface="bold"), row_title_gp = gpar(fontsize = 18, fontface="bold"), right_annotation = ha_rows, row_names_max_width = unit(150, "cm"), column_names_max_height = unit(150, "cm"))
+dev.off()
+
+
+
+```
+
+
+```{r}
+# tbl = ChEA.analysis$`Up_Ex-L2`
+# topTFs = sapply(1:40, function(i) {
+#   tbl = ChEA.analysis[[i]]
+#   if(is.null(tbl)) {
+#     return(1)
+#   }
+#   
+#   tbl.top = tbl$`Integrated--topRank`
+#   tbl.top$TF[as.numeric(tbl.top$Score) < 1e-3]
+# })
+# sort(unique(unlist(topTFs)))
+# 
+```
+
+```{r}
+tbl = ChEA.analysis$`Up_Ex-L2`$`Integrated--topRank`
+
+
+
+TF.pvals = sapply(ChEA.analysis, function(tbl) {
+  if(is.null(tbl)) {
+    return(1)
+  }
+  TFs = tbl$`Integrated--topRank`$TF
+  # scores = -log10((as.numeric(tbl$`Integrated--topRank`$Score)))
+  # names(scores) = TFs
+  # 
+  # res = fgsea::fgsea(list(PGC3 = GWAS.TFs), scores)
+  # res$pval
+  
+  l = as.numeric(TFs %in% GWAS.TFs)
+  if(sum(l) < 5)
+    return (1)
+  mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l)/4, 10, upper_bound = F, tol = 1e-300)
+  mhg.out$pvalue
+})
+TF.pvals.corrected = p.adjust(TF.pvals, method = "fdr")
+TF.pvals.enrichment = -log10(TF.pvals.corrected)
+sort(TF.pvals.enrichment)
+```
+
+
+```{r}
+set.seed(0)
+
+TF.pvals = sapply(ChEA.analysis, function(tbl) {
+  if(is.null(tbl)) {
+    return(1)
+  }
+  TFs = tbl$`Integrated--topRank`$TF
+  # scores = -log10((as.numeric(tbl$`Integrated--topRank`$Score)))
+  # names(scores) = TFs
+  # 
+  # res = fgsea::fgsea(list(PGC3 = GWAS.TFs), scores)
+  # res$pval
+  
+  l = as.numeric(TFs %in% GWAS.TFs)
+  if(sum(l) < 5)
+    return (1)
+  mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l)/4, 10, upper_bound = F, tol = 1e-300)
+  mhg.out$pvalue
+})
+TF.pvals.corrected = p.adjust(TF.pvals, method = "fdr")
+TF.pvals.enrichment = -log10(TF.pvals.corrected)
+sort(TF.pvals.enrichment)
+
+
+
+selected.TFs = sapply(ChEA.analysis, function(tbl) {
+  if(is.null(tbl))
+    return (NULL)
+  TFs = tbl$`Integrated--topRank`$TF
+  l = as.numeric(TFs %in% GWAS.TFs)
+  mhg.out = mhg::mhg_test(l, length(l), sum(l), length(l)/4, 10, upper_bound = F, tol = 1e-300)
+  TFs[1:mhg.out$threshold]
+
+  
+  # TFs = tbl$`Integrated--topRank`$TF
+  # scores = -log10((as.numeric(tbl$`Integrated--topRank`$Score)))
+  # names(scores) = TFs
+  # 
+  # res = fgsea::fgsea(list(PGC3 = GWAS.TFs), scores)
+  # res$leadingEdge[[1]]
+})
+
+sig.selected.TFs = selected.TFs[TF.pvals.corrected < 0.01]
+
+```
+
+
+
+```{r}
+# Top.Up.TFs = sig.selected.TFs[grep("Up", names(sig.selected.TFs))]
+# names(Top.Up.TFs)=sapply(names(Top.Up.TFs), function(x) substr(x, 4, str_length(x)))
+# 
+# Top.Down.TFs = sig.selected.TFs[grep("Down", names(sig.selected.TFs))]
+# names(Top.Down.TFs)=sapply(names(Top.Down.TFs), function(x) substr(x, 6, str_length(x)))
+
+# FunCat.TFs = lapply(FunCat.genes, function(x) intersect(x, all.TFs))
+# fun.Cat.TFs.up = assess.genesets(FunCat.TFs, Top.Up.TFs, length(all.TFs), correct = T)
+# fun.Cat.TFs.down = assess.genesets(FunCat.TFs, Top.Down.TFs, length(all.TFs), correct = T)
+# 
+# 
+# 
+# neurodev.top.TFs = sort(unique(intersect(rownames(pb.logcounts), intersect(FunCat.genes$neurodevelopment, union(sort(unique(unlist(Top.Up.TFs))), sort(unique(unlist(Top.Down.TFs))))))))
+
+neurodev.top.TFs = intersect(sort(unique(intersect(TFs, FunCat.genes$neurodevelopment))), rownames(pb.logcounts))
+
+```
+

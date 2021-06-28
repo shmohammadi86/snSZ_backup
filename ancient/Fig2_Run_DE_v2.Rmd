@@ -1,0 +1,390 @@
+---
+title: "Perform DE analysis"
+output: html_notebook
+---
+
+# Setup
+```{r include=FALSE}
+require(ACTIONet)
+require(stringr)
+require(ComplexHeatmap)
+
+require(muscat)
+require(edgeR)
+require(limma)
+
+dataset.path = "~/results/datasets/"
+results.path = "~/results"
+figures.folder = "~/results/figures"
+
+
+```
+
+
+
+
+
+```{r}
+ACTIONet_summary = readr::read_rds(file.path(dataset.path, "ACTIONet_summary_filtered_individuals.rds"))
+
+pb.logcounts = readr::read_rds(file.path(dataset.path, "PB_mean_logcounts_final.RDS"))
+
+color.df = readRDS(file.path(dataset.path, "celltype_colors.rds"))
+
+# color.df[c(22:24), ] = color.df[c(24, 23, 22), ]
+
+colors = color.df$color
+names(colors) = color.df$celltype
+
+
+ncells = sapply(int_colData(pb.logcounts)$n_cells, as.numeric)
+rownames(ncells) = names(assays(pb.logcounts))
+
+```
+
+
+
+
+
+
+# Prefilter outlier samples wrt ExNero %, or samples that have less than 500 cells (pruning from 140 -> 121 samples)
+```{r}
+cs = Matrix::colSums(ncells)
+ncells.freq = 100*scale(ncells, center = F, scale = cs)
+Ex.perc = (fast_column_sums(ncells.freq[grepl("^Ex", rownames(ncells.freq)) & !grepl("^Ex-NRGN", rownames(ncells.freq)), ]))
+
+# mask = !(pb.logcounts$ID %in% c("SZ15"))
+mask = (Ex.perc >= 10) & (Ex.perc <= 80) #& (fast_column_sums(ncells) >= 500)
+# mask = (Ex.perc >= 1) & (fast_column_sums(ncells) >= 500)
+# mask = (Ex.perc >= 1)
+pb.logcounts.filtered = pb.logcounts [, mask]
+
+
+ff = interaction(ACTIONet_summary$metadata$Individual, ACTIONet_summary$metadata$Labels)
+umi.tbl = split(ACTIONet_summary$metadata$umi_count, ff)
+mean.celltype.umi = sapply(umi.tbl, function(x) {
+  if(length(x) == 0) {
+    return(0)
+  } else {
+    return(mean(x))
+  }
+})
+mean.celltype.umi.mat = matrix(mean.celltype.umi, nrow = length(levels(ACTIONet_summary$metadata$Individual)))
+
+
+```
+
+# Performing cohort-specific DE
+```{r}
+# int_colData(pb.logcounts.filtered)$n_cells = t(metadata(pb.logcounts.filtered)$n_cells)
+# metadata(pb.logcounts.filtered) = metadata(pb.logcounts.filtered)[c(1:2)]
+
+#  [1] "Cohort"          "ID"              "Internal_ID"     "CMC_ID"          "Phenotype"       "Batch"           "HTO"            
+#  [8] "Gender"          "Age"             "PMI"             "EUR_Ancestry"    "EAS_Ancestry"    "AMR_Ancestry"    "SAS_Ancestry"   
+# [15] "AFR_Ancestry"    "Benzodiazepines" "Anticonvulsants" "AntipsychTyp"    "AntipsychAtyp"   "Antidepress"     "Lithium"        
+# [22] "MedPC1"          "MedPC2"          "MedPC3"          "MedPC4"          "MedPC5"          "MedPC6"          "Cells"          
+# [29] "Density"         "SZTR.mean"       "A7.signature"    "A11.signature"   "A17.signature"   "A29.signature"   "PRS"            
+# [36] "POP.EL3SD"       "genes"           "umis"            "mito_perc"       "TPS.Ex"          "TPS.Neuro"       "TPS.All" 
+# form = ~ Phenotype + Batch + Gender + Age + PMI + Benzodiazepines + Anticonvulsants + AntipsychTyp + AntipsychAtyp + Antidepress
+# form = ~ Phenotype + Batch + Gender + Age + PMI + Benzodiazepines + Anticonvulsants + AntipsychTyp + AntipsychAtyp + Antidepress + EUR_Ancestry + EAS_Ancestry + AMR_Ancestry + SAS_Ancestry + AFR_Ancestry
+
+# pb.logcounts.filtered$logumis = log1p(pb.logcounts.filtered$umis)
+
+pb.logcounts.filtered$SampleQuality = scale(log1p(pb.logcounts.filtered$umis))
+form = ~ Phenotype + Batch + PMI + Gender + Age + Benzodiazepines + Anticonvulsants + AntipsychTyp + AntipsychAtyp + Antidepress + SampleQuality
+
+resDE = lapply( levels(pb.logcounts.filtered$Cohort), function(chrt){
+
+	keep.ids = colnames(pb.logcounts.filtered)[pb.logcounts.filtered$Cohort == chrt]
+
+	pb.logcounts.filtered_sub = pb.logcounts.filtered[,keep.ids]
+	# metadata(pb.logcounts.filtered_sub)$n_cells = metadata(pb.logcounts.filtered_sub)$n_cells[,keep.ids]
+  sample.metadata = droplevels(data.frame(colData(pb.logcounts.filtered_sub)))
+	design.mat <- model.matrix(form, data = sample.metadata)
+
+# #   sample.quality.mat = apply(mean.celltype.umi.mat[pb.logcounts.filtered_sub$ID, ], 2, function(x) log2(x / mean(x)))
+# # 	sample.quality.mat[sample.quality.mat == -Inf] = min(sample.quality.mat[!is.infinite(sample.quality.mat)])
+#   sample.quality.mat = log1p(apply(mean.celltype.umi.mat[pb.logcounts.filtered_sub$ID, ], 2, function(x) x))
+#   
+#   
+# 	sample.quality.mat[sample.quality.mat == 0] = NA
+#   sample.quality.mat.z = apply(sample.quality.mat, 2, function(x) x / sum(x, na.rm = T))
+# 
+#     sample.quality = as.numeric(scale(apply(sample.quality.mat.z, 1, function(x) mean(x, na.rm = T)	)))
+
+#   
+#   
+# 	sample.quality.mat[sample.quality.mat == 0] = NA
+#   sample.quality.mat.z = apply(sample.quality.mat, 2, function(x) (x - median(x, na.rm = T))/mad(x, na.rm = T))
+# 	sample.quality.mat.z[sample.quality.mat.z < -3] = -3
+# 	sample.quality.mat.z[sample.quality.mat.z > 3] = 3
+# 
+#   # sample.quality.mat = apply(sample.quality.mat, 2, function(x) x / sum(x))
+# 
+#   
+#   design.mat = cbind(design.mat, sample.quality)
+#   colnames(design.mat)[[ncol(design.mat)]] = "SampleQuality"
+	
+
+	# colnames(design.mat) = c("Intercept", "PhenotypeSZ", paste("V", 3:ncol(design.mat), sep = ""))
+	colnames(design.mat)[1] = c("Intercept")
+
+	contrast.mat <- makeContrasts(contrasts = "PhenotypeSZ", levels = design.mat)
+
+	df = pbDS(pb.logcounts.filtered_sub, method = "limma-trend", min_cells = 5, design = design.mat, contrast =  contrast.mat, filter = "both")
+	
+})
+names(resDE) = levels(colData(pb.logcounts.filtered)$Cohort)
+
+readr::write_rds(resDE, file.path(dataset.path, "Cohort_specific_DE_results_final_with_logumi_baseline_full_filter_extended_cell_filtering.rds"))
+
+# resDE = readr::read_rds("~/PFC_v3/")
+# lst_meta = readr::read_rds("~/PFC_v3/filtered_resDE.rds")
+
+
+```
+
+
+## Export as excel tables
+```{r}
+for(ds in 1:2) {
+
+  library(openxlsx)
+  Up.wb <- createWorkbook()
+  for(i in 1:length(resDE[[ds]]$table$PhenotypeSZ)) {
+    res = resDE[[ds]]$table$PhenotypeSZ[[i]]
+    res = res[res$logFC > 0, ]
+    res = cbind(data.frame(Gene = rownames(res)), res)
+    res = res[order(res$t, decreasing = T), ]
+  
+    n = names(resDE[[ds]]$table$PhenotypeSZ)[[i]] #str_replace(arch.names[arch.order[i]], "/", "-")
+    
+    addWorksheet(wb=Up.wb, sheetName = n)
+    writeData(Up.wb, sheet = n, res) 
+  
+  }
+  saveWorkbook(Up.wb, sprintf(file.path(dataset.path, "DE_genes_up_%s_with_logumi_baseline_full_filter_extended_cell_filtering_fullset.xlsx"), names(resDE)[[ds]]), overwrite = TRUE)
+  
+  
+  library(openxlsx)
+  Down.wb <- createWorkbook()
+  for(i in 1:length(resDE[[ds]]$table$PhenotypeSZ)) {
+    res = resDE[[ds]]$table$PhenotypeSZ[[i]]
+    res = res[res$logFC < 0, ]
+    res = cbind(data.frame(Gene = rownames(res)), res)
+    res = res[order(res$t, decreasing = F), ]
+    
+    n = names(resDE[[ds]]$table$PhenotypeSZ)[[i]] #str_replace(arch.names[arch.order[i]], "/", "-")
+    
+    addWorksheet(wb=Down.wb, sheetName = n)
+    writeData(Down.wb, sheet = n, res) 
+  
+  }
+  saveWorkbook(Down.wb, sprintf(file.path(dataset.path, "DE_genes_down_%s_with_logumi_baseline_full_filter_extended_cell_filtering_fullset.xlsx"), names(resDE)[[ds]]), overwrite = TRUE)
+}
+
+```
+
+
+
+# Prefiltering individual DE results before combining them
+Only keep genes that have 1) consistent direction of dysregulation across both datasets, and 2) at least 1 sd away from zero on the logFC scale
+
+```{r}
+celltypes = intersect(names(resDE$McLean$table$PhenotypeSZ), names(resDE$MtSinai$table$PhenotypeSZ))
+
+filtered.tables = lapply(celltypes, function(celltype) {
+  tbl1 = resDE[[1]]$table$PhenotypeSZ[[celltype]]
+  tbl2 = resDE[[2]]$table$PhenotypeSZ[[celltype]]
+  
+  genes = intersect(tbl1$gene[1 <= abs(tbl1$logFC/sd(tbl1$logFC))], tbl2$gene[1 <= abs(tbl2$logFC / sd(tbl2$logFC))])
+  # genes = intersect(tbl1$gene, tbl2$gene)
+  
+  tbl1 = tbl1[match(genes, tbl1$gene), ]
+  tbl2 = tbl2[match(genes, tbl2$gene), ]
+  
+  mask = sign(tbl1$logFC)*sign(tbl2$logFC) > 0
+  tbl1 = tbl1[mask, ]
+  tbl2 = tbl2[mask, ]
+  
+  tbls = list(McClean = tbl1, MtSinai = tbl2) 
+  tbls = lapply( tbls, function(tab){
+    tab$se = tab$logFC / tab$t
+    tab
+  })
+  
+  return(tbls)
+})
+names(filtered.tables) = celltypes
+
+readr::write_rds(filtered.tables, file.path(dataset.path, "individual_diff_results_filtered_full_with_logumi_baseline_full_filter_extended_cell_filtering.rds"))
+
+```
+
+## Export as excel tables
+```{r}
+for(ds in 1:2) {
+
+  library(openxlsx)
+  Up.wb <- createWorkbook()
+  for(i in 1:length(filtered.tables)) {
+    res = filtered.tables[[i]][[ds]]
+    res = res[res$logFC > 0, ]
+    res = cbind(data.frame(Gene = rownames(res)), res)
+    res = res[order(res$t, decreasing = T), ]
+  
+    n = names(filtered.tables)[[i]] #str_replace(arch.names[arch.order[i]], "/", "-")
+    
+    addWorksheet(wb=Up.wb, sheetName = n)
+    writeData(Up.wb, sheet = n, res) 
+  
+  }
+  saveWorkbook(Up.wb, sprintf(file.path(dataset.path, "DE_genes_up_%s_with_logumi_baseline_full_filter_extended_cell_filtering.xlsx"), names(filtered.tables[[i]])[[ds]]), overwrite = TRUE)
+  
+  
+  library(openxlsx)
+  Down.wb <- createWorkbook()
+  for(i in 1:length(filtered.tables)) {
+    res = filtered.tables[[i]][[ds]]
+    res = res[res$logFC < 0, ]
+    res = cbind(data.frame(Gene = rownames(res)), res)
+    res = res[order(res$t, decreasing = F), ]
+    
+    n = names(filtered.tables)[[i]] #str_replace(arch.names[arch.order[i]], "/", "-")
+    
+    addWorksheet(wb=Down.wb, sheetName = n)
+    writeData(Down.wb, sheet = n, res) 
+  
+  }
+  saveWorkbook(Down.wb, sprintf(file.path(dataset.path, "DE_genes_down_%s_with_logumi_baseline_full_filter_extended_cell_filtering.xlsx"), names(filtered.tables[[i]])[[ds]]), overwrite = TRUE)
+}
+
+```
+
+
+```{r}
+combined.analysis.tables = lapply(names(filtered.tables), function(celltype) {
+  print(celltype)
+  tbls = filtered.tables[[celltype]]
+  
+  gene.tbls = lapply(1:nrow(tbls[[1]]), function(i) {
+    dfs = lapply(1:length(tbls), function(k) tbls[[k]][i, ])
+    df = do.call("rbind", dfs)
+  })
+  names(gene.tbls) = tbls[[1]]$gene
+    
+  combined.analysis.tbl = do.call(rbind, lapply(names(gene.tbls), function(gene){
+    x = suppressWarnings(metafor::rma(yi=logFC, sei=se, data = gene.tbls[[gene]], method="FE"))
+    combined.tbl = data.frame( gene = gene, 
+        logFC     = x$beta,
+        se        = x$se,
+        tstat = x$zval,
+        P.Value   = x$pval)
+    return(combined.tbl)
+  }))
+  rownames(combined.analysis.tbl) = names(gene.tbls)
+  
+  combined.analysis.tbl = combined.analysis.tbl[order(combined.analysis.tbl$P.Value), ]
+  
+  return(combined.analysis.tbl)
+})
+names(combined.analysis.tables) = names(filtered.tables)
+
+DF = do.call(rbind, combined.analysis.tables)
+DF$adj.P.Val = p.adjust(DF$P.Value, "fdr")
+ff = factor(unlist(lapply(names(combined.analysis.tables), function(celltype) rep(celltype, nrow(combined.analysis.tables[[celltype]])))), names(filtered.tables))
+combined.analysis.tables = split(DF, ff)
+
+readr::write_rds(combined.analysis.tables, file.path(dataset.path, "meta_analysis_diff_results_full_with_logumi_baseline_full_filter_extended_cell_filtering.rds"))
+
+```
+
+
+
+```{r eval=FALSE, include=FALSE}
+resDE = readr::read_rds(file.path(dataset.path, "filtered_resDE_with_logumi_baseline_full_filter_extended_cell_filtering.rds"))
+
+filtered.tables = readr::read_rds(file.path(dataset.path, "individual_diff_results_filtered_full_with_logumi_baseline_full_filter_extended_cell_filtering.rds"))
+
+combined.analysis.tables = readr::read_rds(file.path(dataset.path, "meta_analysis_diff_results_with_logumi_baseline_full_filter_extended_cell_filtering.rds"))
+
+```
+
+```{r}
+  library(openxlsx)
+  Up.wb <- createWorkbook()
+  for(i in 1:length(combined.analysis.tables)) {
+    res = combined.analysis.tables[[i]]
+    res = res[(res$logFC > 0.1) & (res$P.Value <= 0.05), ]
+    res = res[order(res$t, decreasing = T), ]
+  
+    n = names(combined.analysis.tables)[[i]] #str_replace(arch.names[arch.order[i]], "/", "-")
+    
+    addWorksheet(wb=Up.wb, sheetName = n)
+    writeData(Up.wb, sheet = n, res) 
+  
+  }
+  saveWorkbook(Up.wb, sprintf(file.path(dataset.path, "DE_genes_up_%s_with_logumi_baseline_full_filter_extended_cell_filtering.xlsx"), "combined"), overwrite = TRUE)
+  
+  
+  library(openxlsx)
+  Down.wb <- createWorkbook()
+  for(i in 1:length(combined.analysis.tables)) {
+    res = combined.analysis.tables[[i]]
+    res = res[(res$logFC < -0.1) & (res$P.Value <= 0.05), ]
+    res = res[order(res$t, decreasing = F), ]
+    
+    n = names(combined.analysis.tables)[[i]] #str_replace(arch.names[arch.order[i]], "/", "-")
+    
+    addWorksheet(wb=Down.wb, sheetName = n)
+    writeData(Down.wb, sheet = n, res) 
+  
+  }
+  saveWorkbook(Down.wb, sprintf(file.path(dataset.path, "DE_genes_down_%s_with_logumi_baseline_full_filter_extended_cell_filtering.xlsx"), "combined"), overwrite = TRUE)
+```
+
+
+```{r}
+DE.sc = matrix(0, nrow(pb.logcounts), length(combined.analysis.tables))
+tstats = matrix(0, nrow(pb.logcounts), length(combined.analysis.tables))
+logFC = matrix(0, nrow(pb.logcounts), length(combined.analysis.tables))
+logPvals = matrix(0, nrow(pb.logcounts), length(combined.analysis.tables))
+rownames(DE.sc) = rownames(tstats) = rownames(logFC) = rownames(logPvals) = rownames(pb.logcounts)
+colnames(DE.sc) = colnames(tstats) = colnames(logFC) = colnames(logPvals) = names(combined.analysis.tables)
+
+limma_trend_mean.scores = matrix(0, nrow(pb.logcounts), length(combined.analysis.tables))
+Up.genes = vector("list", length(combined.analysis.tables))
+Down.genes = vector("list", length(combined.analysis.tables))
+rownames(limma_trend_mean.scores) = rownames(pb.logcounts)
+names(Up.genes) = names(Down.genes) = colnames(limma_trend_mean.scores) = names(combined.analysis.tables)
+for(i in 1:length(combined.analysis.tables)) {
+	print(i)
+	
+	tbl = combined.analysis.tables[[i]]
+
+	tstats[tbl$gene, names(combined.analysis.tables)[[i]]] = tbl$tstat
+	logFC[tbl$gene, names(combined.analysis.tables)[[i]]] = tbl$logFC
+	logPvals[tbl$gene, names(combined.analysis.tables)[[i]]] = -log10(tbl$adj.P.Val)
+	
+	DE.sc[tbl$gene, names(combined.analysis.tables)[[i]]] = tbl$tstat
+	
+}
+limma_trend_mean.scores[is.na(limma_trend_mean.scores)] = 0
+
+
+Up.genes = lapply(combined.analysis.tables, function(combined.analysis.tbl) {
+  combined.analysis.tbl$gene[(combined.analysis.tbl$logFC > 0.1) & (combined.analysis.tbl$adj.P.Val < 0.05)]
+})
+Down.genes = lapply(combined.analysis.tables, function(combined.analysis.tbl) {
+  combined.analysis.tbl$gene[(combined.analysis.tbl$logFC < -0.1) & (combined.analysis.tbl$adj.P.Val < 0.05)]
+})
+
+DE.new = list(DE.sc = DE.sc, tstats = tstats, logFC = logFC, logPvals = logPvals, Up.genes = Up.genes, Down.genes = Down.genes)
+
+saveRDS(DE.new, file.path(dataset.path, "DE_genes_pseudobulk_final_with_logumi_baseline_full_filter_extended_cell_filtering.rds"))
+
+
+
+```
+
+

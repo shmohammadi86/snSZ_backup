@@ -1,0 +1,396 @@
+---
+title: "Perform DE analysis"
+subtitle: "Step 1: Compute pseudobulk (PB) profiles"
+author: "Shahin Mohammadi"
+date: "Run on `r Sys.time()`"
+documentclass: article
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+suppressPackageStartupMessages({
+library(ACTIONet)
+library(data.table)
+library(ggplot2)
+library(ggrepel)
+library(cowplot)
+library(corrplot)
+library(limma)
+library(muscat)
+library(metafor)
+library(ggcorrplot)
+library(synapser)
+library(synExtra)
+synLogin(rememberMe = TRUE)
+source("functions.R")
+})
+
+knitr::opts_chunk$set(
+	eval = FALSE,
+	error = FALSE,
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	dev = c("png", "pdf"),
+	include = FALSE,
+	tidy = FALSE
+)
+
+
+```
+
+
+# Setup environment
+```{r}
+dataset.path = "~/results/datasets/"
+figures.path = "~/results/figures"
+tables.path = "~/results/tables"
+input.path = "~/results/input"
+
+dev_threshold = 1 # logFC needs to be 1 std away from 0 (in both datasets) prior to metanalysis
+
+# Thresholds on the FDR-corrected meta-analysis results
+pval_threshold = 0.05
+logFC_threshold = 0.1
+
+# Load pseudobulk samples
+pb.sce = loadDataset("pseudobulk_mean_logcounts", dataset.path = dataset.path)
+ACTIONet_summary = loadDataset("ACTIONet_summary", dataset.path = dataset.path)
+colors = loadDataset("celltype_colors", dataset.path = dataset.path)
+
+
+```
+
+
+# Prefilter outlier samples using % of excitatory neurons
+SZ33 is removed due to having > 80% ExNeu, and samples SZ3, SZ15, SZ24, SZ29 are removed due to having less than 10% ExNeu
+```{r}
+ncells = apply(table(ACTIONet_summary$metadata$Labels, ACTIONet_summary$metadata$Individual), 2, as.numeric)
+rownames(ncells) = levels(ACTIONet_summary$metadata$Labels)
+
+cs = Matrix::colSums(ncells)
+ncells.freq = 100*scale(ncells, center = F, scale = cs)
+Ex.perc = (fast_column_sums(ncells.freq[grepl("^Ex", rownames(ncells.freq)) & !grepl("^Ex-NRGN", rownames(ncells.freq)), ]))
+
+mask = (Ex.perc >= 10) & (Ex.perc <= 80) 
+pb.sce.filtered = pb.sce[, mask]
+
+```
+
+
+
+
+# Performing cohort-specific DE
+```{r}
+pb.sce.filtered$SampleQuality = scale(log1p(pb.sce.filtered$umis))
+form = ~ Phenotype + Batch + PMI + Gender + Age + Benzodiazepines + Anticonvulsants + AntipsychTyp + AntipsychAtyp + Antidepress + SampleQuality
+
+resDE = lapply( levels(pb.sce.filtered$Cohort), function(chrt){
+
+	keep.ids = colnames(pb.sce.filtered)[pb.sce.filtered$Cohort == chrt]
+
+	pb.sce.filtered_sub = pb.sce.filtered[,keep.ids]
+  sample.metadata = droplevels(data.frame(colData(pb.sce.filtered_sub)))
+	design.mat <- model.matrix(form, data = sample.metadata)
+	colnames(design.mat)[1] = c("Intercept")
+
+	contrast.mat <- makeContrasts(contrasts = "PhenotypeSZ", levels = design.mat)
+
+	df = pbDS(pb.sce.filtered_sub, method = "limma-trend", min_cells = 5, design = design.mat, contrast =  contrast.mat, filter = "both")
+	
+})
+names(resDE) = levels(colData(pb.sce.filtered)$Cohort)
+
+```
+
+```{r}
+storeDataset(resDE, name = "Cohort_specific_DE_results", dataset.path = dataset.path)
+
+```
+
+
+# Export unfiltered cohort-specific tables
+```{r}
+for(ds in 1:length(resDE)) {
+  print(names(resDE)[[ds]])
+  
+  Up.DFs = lapply(1:length(resDE[[ds]]$table$PhenotypeSZ), function(i) {
+    res = resDE[[ds]]$table$PhenotypeSZ[[i]]
+    res = res[res$logFC > 0, ]
+    res = cbind(data.frame(Gene = rownames(res)), res)
+    res = res[order(res$t, decreasing = T), ]
+    return(res)  
+  })
+  names(Up.DFs) = names(resDE[[ds]]$table$PhenotypeSZ)
+  storeTable(Up.DFs, name = sprintf("DE_genes_up_%s_complete_set", names(resDE)[[ds]]), tables.path = tables.path)
+
+  Down.DFs = lapply(1:length(resDE[[ds]]$table$PhenotypeSZ), function(i) {
+    res = resDE[[ds]]$table$PhenotypeSZ[[i]]
+    res = res[res$logFC < 0, ]
+    res = cbind(data.frame(Gene = rownames(res)), res)
+    res = res[order(res$t, decreasing = F), ]
+  })
+  names(Down.DFs) = names(resDE[[ds]]$table$PhenotypeSZ)
+  storeTable(Down.DFs, name = sprintf("DE_genes_down_%s_complete_set", names(resDE)[[ds]]), tables.path = tables.path)
+}
+
+```
+
+
+
+
+
+
+# Compute Storey's pi1 per dataset
+```{r}
+tstat.overlap = sapply(common.celltypes, function(celltype) {
+  df1 = resDE$McLean$table$PhenotypeSZ[[celltype]]
+  df2 = resDE$MtSinai$table$PhenotypeSZ[[celltype]]
+  common.genes = intersect(df1$gene, df2$gene)
+  t1 = df1$t[match(common.genes, df1$gene)]  
+  t2 = df2$t[match(common.genes, df2$gene)]  
+  
+  tt = cor.test(t1, t2)
+  
+  return(tt$statistic)
+})
+tstat.overlap[tstat.overlap < 0] = 0
+names(tstat.overlap) = common.celltypes
+
+X = cbind(sapply(DE.new$Up.genes, length),sapply(DE.new$Down.genes, length))
+ordered.celltypes = rownames(X)[order(apply(X, 1, sum), decreasing = T)]
+
+PurPal = colorRampPalette(RColorBrewer::brewer.pal(9, "Purples"))(200)
+ht = Heatmap(as.matrix(tstat.overlap[ordered.celltypes]), col = PurPal, cluster_rows = F, cluster_columns = F, rect_gp = gpar(col = "black"), row_names_gp = gpar(col = colors[ordered.celltypes]), name = "-log10(pval(correlation))")
+
+storeFigure(ht, name = "Cohort_overlap", extension = "pdf", figures.path = figures.path, width = 4)
+
+```
+
+
+# Plot Storey's Pi1 for each dataset
+```{r}
+library(qvalue)
+McLean.Pi1 = sapply(resDE$McLean$table$PhenotypeSZ, function(df) {
+  pvals = df$p_val
+  pi1 = 1 - qvalue(pvals)$pi0
+})
+
+MtSinai.Pi1 = sapply(resDE$MtSinai$table$PhenotypeSZ, function(df) {
+  pvals = df$p_val
+  pi1 = 1 - qvalue(pvals)$pi0
+})
+df = data.frame(Celltype = union(names(resDE$MtSinai$table$PhenotypeSZ), names(resDE$McLean$table$PhenotypeSZ)))
+rownames(df) = df$Celltype
+df$McLean = McLean.Pi1[df$Celltype]
+df$MtSinai = 0
+df[names(MtSinai.Pi1), "MtSinai"] = -MtSinai.Pi1
+df = df[rev(ordered.celltypes), ]
+df$Celltype = factor(df$Celltype, rev(ordered.celltypes))
+df2 = reshape2::melt(df)
+colnames(df2) = c("Celltype", "Dataset", "Pi1")
+
+gg = ggplot(data = df2, aes(x = Celltype, y = Pi1, fill = Dataset)) + geom_bar(stat = "identity")+
+  coord_flip()+ylab("Sorted Celltypes")+
+labs(y = "Storey's Pi1", x = "Sorted Celltypes")+
+  theme_minimal()+
+  guides(fill = FALSE)+ scale_fill_manual(values=c("#666666", "#cccccc")) + theme(axis.text.y = element_text(face="bold", color=colors[levels(df$Celltype)], size=12, angle=0), axis.text.x = element_text(face="bold", color="black", size=12, angle=0), axis.title = element_text(face="bold", size=14, angle=0)) + ylim(c(-0.4, 0.4))
+
+storeFigure(gg, name = "Cohort_specific_Pi1", extension = "pdf", figures.path = figures.path)
+
+
+```
+
+
+
+
+# Prefiltering individual DE results before combining them
+Only keep genes that have 1) consistent direction of dysregulation across both datasets, and 2) at least 1 std away from zero on the logFC scale
+
+```{r}
+common.celltypes = intersect(names(resDE$McLean$table$PhenotypeSZ), names(resDE$MtSinai$table$PhenotypeSZ))
+
+filtered.tables = lapply(common.celltypes, function(celltype) {
+  tbl1 = resDE[[1]]$table$PhenotypeSZ[[celltype]]
+  tbl2 = resDE[[2]]$table$PhenotypeSZ[[celltype]]
+  
+  genes = intersect(tbl1$gene[dev_threshold <= abs(tbl1$logFC/sd(tbl1$logFC))], tbl2$gene[dev_threshold <= abs(tbl2$logFC / sd(tbl2$logFC))])
+
+  tbl1 = tbl1[match(genes, tbl1$gene), ]
+  tbl2 = tbl2[match(genes, tbl2$gene), ]
+  
+  mask = sign(tbl1$logFC)*sign(tbl2$logFC) > 0
+  tbl1 = tbl1[mask, ]
+  tbl2 = tbl2[mask, ]
+  
+  tbls = list(McClean = tbl1, MtSinai = tbl2) 
+  tbls = lapply( tbls, function(tab){
+    tab$se = tab$logFC / tab$t
+    tab
+  })
+  
+  return(tbls)
+})
+names(filtered.tables) = common.celltypes
+
+```
+
+# Store filtered results
+```{r}
+storeDataset(filtered.tables, "Cohort_specific_DE_results_filtered", dataset.path = dataset.path)
+
+```
+
+## Export as excel tables
+```{r}
+for(ds in 1:length(filtered.tables[[1]])) {
+  Up.DFs = lapply(1:length(filtered.tables), function(i) {
+    res = filtered.tables[[i]][[ds]]
+    res = res[res$logFC > 0, ]
+    res = cbind(data.frame(Gene = rownames(res)), res)
+    res = res[order(res$t, decreasing = T), ]
+  })
+  names(Up.DFs) = names(filtered.tables)
+  storeTable(Up.DFs, name = sprintf("DE_genes_up_%s_filtered", names(filtered.tables)[[ds]]), tables.path = tables.path)
+
+  
+  Down.DFs = lapply(1:length(filtered.tables), function(i) {
+    res = filtered.tables[[i]][[ds]]
+    res = res[res$logFC < 0, ]
+    res = cbind(data.frame(Gene = rownames(res)), res)
+    res = res[order(res$t, decreasing = F), ]
+  })
+  names(Down.DFs) = names(filtered.tables)
+  storeTable(Down.DFs, name = sprintf("DE_genes_down_%s_filtered", names(filtered.tables)[[ds]]), tables.path = tables.path)
+  
+}
+
+```
+
+# Perform meta-analysis via Linear (Mixed-Effects) Models (RMA)
+```{r}
+combined.analysis.tables = lapply(names(filtered.tables), function(celltype) {
+  print(celltype)
+  tbls = filtered.tables[[celltype]]
+  
+  gene.tbls = lapply(1:nrow(tbls[[1]]), function(i) {
+    dfs = lapply(1:length(tbls), function(k) tbls[[k]][i, ])
+    df = do.call("rbind", dfs)
+  })
+  names(gene.tbls) = tbls[[1]]$gene
+    
+  combined.analysis.tbl = do.call(rbind, lapply(names(gene.tbls), function(gene){
+    x = suppressWarnings(metafor::rma(yi=logFC, sei=se, data = gene.tbls[[gene]], method="FE"))
+    combined.tbl = data.frame( gene = gene, 
+        logFC     = x$beta,
+        se        = x$se,
+        tstat = x$zval,
+        P.Value   = x$pval)
+    return(combined.tbl)
+  }))
+  rownames(combined.analysis.tbl) = names(gene.tbls)
+  
+  combined.analysis.tbl = combined.analysis.tbl[order(combined.analysis.tbl$P.Value), ]
+  
+  return(combined.analysis.tbl)
+})
+names(combined.analysis.tables) = names(filtered.tables)
+
+DF = do.call(rbind, combined.analysis.tables)
+DF$adj.P.Val = p.adjust(DF$P.Value, "fdr")
+ff = factor(unlist(lapply(names(combined.analysis.tables), function(celltype) rep(celltype, nrow(combined.analysis.tables[[celltype]])))), names(filtered.tables))
+combined.analysis.tables = split(DF, ff)
+
+```
+
+# Export meta-analysis results
+```{r}
+storeDataset(combined.analysis.tables, "meta_analysis_results", dataset.path = dataset.path)
+
+
+```
+
+
+
+# Export final tables
+```{r}
+  Up.DFs = lapply(1:length(combined.analysis.tables), function(i) {
+    res = combined.analysis.tables[[i]]
+    res = res[(res$logFC > logFC_threshold) & (res$P.Value <= pval_threshold), ]
+    res = res[order(res$t, decreasing = T), ]
+    res$isSig = res$adj.P.Val <= pval_threshold
+    
+  })
+  names(Up.DFs) = names(combined.analysis.tables)
+  storeTable(Up.DFs, name = "DE_genes_up_combined", tables.path = tables.path)
+
+  
+  Down.DFs = lapply(1:length(combined.analysis.tables), function(i) {
+    res = combined.analysis.tables[[i]]
+    res = res[(res$logFC < -logFC_threshold) & (res$P.Value <= pval_threshold), ]
+    res = res[order(res$t, decreasing = F), ]
+    res$isSig = res$adj.P.Val <= pval_threshold
+    
+  })
+  names(Down.DFs) = names(combined.analysis.tables)
+  
+  storeTable(Down.DFs, name = "DE_genes_down_combined", tables.path = tables.path)
+  
+```
+
+
+# Summarize and simplify DE results
+```{r}
+DE.sc = matrix(0, nrow(pb.sce), length(combined.analysis.tables))
+tstats = matrix(0, nrow(pb.sce), length(combined.analysis.tables))
+logFC = matrix(0, nrow(pb.sce), length(combined.analysis.tables))
+logPvals = matrix(0, nrow(pb.sce), length(combined.analysis.tables))
+rownames(DE.sc) = rownames(tstats) = rownames(logFC) = rownames(logPvals) = rownames(pb.sce)
+colnames(DE.sc) = colnames(tstats) = colnames(logFC) = colnames(logPvals) = names(combined.analysis.tables)
+
+limma_trend_mean.scores = matrix(0, nrow(pb.sce), length(combined.analysis.tables))
+Up.genes = vector("list", length(combined.analysis.tables))
+Down.genes = vector("list", length(combined.analysis.tables))
+rownames(limma_trend_mean.scores) = rownames(pb.sce)
+names(Up.genes) = names(Down.genes) = colnames(limma_trend_mean.scores) = names(combined.analysis.tables)
+for(i in 1:length(combined.analysis.tables)) {
+	print(i)
+	
+	tbl = combined.analysis.tables[[i]]
+
+	tstats[tbl$gene, names(combined.analysis.tables)[[i]]] = tbl$tstat
+	logFC[tbl$gene, names(combined.analysis.tables)[[i]]] = tbl$logFC
+	logPvals[tbl$gene, names(combined.analysis.tables)[[i]]] = -log10(tbl$adj.P.Val)
+	
+	x = tbl$tstat
+	x[abs(tbl$logFC) < logFC_threshold] = 0
+	DE.sc[tbl$gene, names(combined.analysis.tables)[[i]]] = x
+	
+}
+limma_trend_mean.scores[is.na(limma_trend_mean.scores)] = 0
+
+
+Up.genes = lapply(combined.analysis.tables, function(combined.analysis.tbl) {
+  combined.analysis.tbl$gene[(combined.analysis.tbl$logFC > logFC_threshold) & (combined.analysis.tbl$adj.P.Val < pval_threshold)]
+})
+Down.genes = lapply(combined.analysis.tables, function(combined.analysis.tbl) {
+  combined.analysis.tbl$gene[(combined.analysis.tbl$logFC < -logFC_threshold) & (combined.analysis.tbl$adj.P.Val < pval_threshold)]
+})
+
+DE.new = list(DE.sc = DE.sc, tstats = tstats, logFC = logFC, logPvals = logPvals, Up.genes = Up.genes, Down.genes = Down.genes)
+
+
+```
+# Store final results
+```{r}
+storeDataset(DE.new, "DE_genes_pseudobulk", dataset.path = dataset.path)
+
+```
+
+
+
+
+

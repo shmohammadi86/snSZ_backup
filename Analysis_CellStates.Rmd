@@ -1,0 +1,665 @@
+---
+title: "Analyze Cell states"
+subtitle: ""
+author: "Shahin Mohammadi"
+date: "Run on `r Sys.time()`"
+documentclass: article
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+suppressPackageStartupMessages({
+library(ACTIONet)
+library(data.table)
+library(ggplot2)
+library(ggrepel)
+library(cowplot)
+library(corrplot)
+library(limma)
+library(muscat)
+library(metafor)
+library(ggcorrplot)
+library(openxlsx)
+library(simplifyEnrichment)
+library(synapser)
+library(synExtra)
+synLogin(rememberMe = TRUE)
+source("functions.R")
+})
+
+knitr::opts_chunk$set(
+	error = FALSE,
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	dev = c("png", "pdf"),
+	include = FALSE,
+	tidy = FALSE
+)
+```
+
+
+# Setup environment
+```{r}
+dataset.path = "~/results/datasets/"
+figures.path = "~/results/figures"
+tables.path = "~/results/tables"
+input.path = "~/results/input"
+
+# Load pseudobulk samples
+pb.logcounts = loadDataset("pseudobulk_mean_logcounts", dataset.path = dataset.path)
+ACTIONet_summary = loadDataset("ACTIONet_summary", dataset.path = dataset.path)
+colors = loadDataset("celltype_colors", dataset.path = dataset.path)
+
+SZ.genes = loadInputDataset("SCZ_associated_genesets", extension = "rds")
+
+DE.new = loadDataset("DE_genes_pseudobulk", dataset.path = dataset.path)
+Up.genes = DE.new$Up.genes
+Down.genes = DE.new$Down.genes
+DE.sc = DE.new$DE.sc
+
+X = cbind(sapply(DE.new$Up.genes, length),sapply(DE.new$Down.genes, length))
+ordered.celltypes = rownames(X)[order(apply(X, 1, sum), decreasing = T)]
+
+```
+
+
+
+
+## Load significant variants and mapped genes
+```{r}
+PGC3.finemapped.genes.tbl = read.table(file.path(input.path, "Prioritised_PGC3_SZ_Genes.csv"), sep = "\t", header = T)
+PGC3.loci = read.table(file.path(input.path, "PGC3_SZ_significant_loci.csv"), sep = "\t", header = T)
+
+PGC3.finemapped.genes.tbl = loadInputDataset("Prioritised_PGC3_SZ_Genes", "tsv")
+PGC3.loci = loadInputDataset("PGC3_SZ_significant_loci", "tsv")
+
+
+associated.genes = PGC3.loci$`ENSEMBL genes  all (clear names)`
+
+
+PGC3.all.genes.raw = sort(unique(unlist(sapply(PGC3.loci$`ENSEMBL genes  all (clear names)`, function(str) {
+  if(str == "-") {
+    return("-")
+  }
+  gs = str_split(str, ",")[[1]]
+  
+  return(gs)
+}))))
+
+PGC3.all.genes = intersect(PGC3.all.genes.raw, rownames(DE.sc))
+
+
+```
+
+
+# Compute transcriptional deviation scores -> (sum) -> transcriptional pathology score
+```{r}
+common.genes = intersect(rownames(DE.new$DE.sc), rownames(pb.logcounts))
+X.DE = DE.new$DE.sc[common.genes, ]
+Z.DE = scale(X.DE)
+
+idx = match(colnames(Z.DE), names(assays(pb.logcounts)))
+TD.scores = sapply(1:ncol(Z.DE), function(i) {
+  print(i)
+  
+	Z = scale(assays(pb.logcounts)[[idx[[i]]]][common.genes, ])
+	Z[is.na(Z)] = 0
+
+	Z.ortho = orthoProject(Z, Matrix::rowMeans(Z))
+	Z.ortho[is.na(Z.ortho)] = 0
+
+	cc = (Matrix::t(Z.ortho) %*% Z.DE[, i]) / nrow(Z.DE)
+})
+colnames(TD.scores) = colnames(Z.DE)
+rownames(TD.scores) = colnames(pb.logcounts)
+
+TPS = Matrix::rowMeans(TD.scores)
+cor(TPS, pb.logcounts$A17.signature, method = "spearman")
+
+pb.logcounts$TPS = TPS
+
+```
+
+# Export TPS result table
+```{r}
+DF = cbind(data.frame(Phenotype = pb.logcounts$Phenotype, SZTR = pb.logcounts$A17.signature, PRS = pb.logcounts$PRS, TPS = pb.logcounts$TPS), as.data.frame(TD.scores))
+
+storeTable(list(TPS = DF), name = "TPS_table", tables.path = tables.path)
+
+```
+
+
+# Visualize TPS scores
+```{r}
+require(viridis)
+
+ll.common = intersect(names(colors), colnames(scores))
+selected.colors = colors[ll.common]
+
+sub.scores = TD.scores
+
+pheno = factor(pb.logcounts.filtered$Phenotype)
+SZTR.mean = scale(pb.logcounts.filtered$A17.signature)
+TPS = pb.logcounts.filtered$TPS
+PRS = scale(pb.logcounts.filtered$PRS)
+perm = order(TPS, decreasing = T)
+names(TPS) = pb.logcounts.filtered$ID
+
+
+ht = Heatmap(TPS[perm], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "TPS", rect_gp = gpar(col = "black")) + Heatmap(sub.scores[perm, grep("^Ex", colnames(sub.scores))], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "Ex", column_title =  "Ex", rect_gp = gpar(col = "black"), column_names_gp = gpar(col = selected.colors[grep("^Ex", colnames(sub.scores))])) + Heatmap(sub.scores[perm, grep("^In", colnames(sub.scores))], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "In", column_title = "In", rect_gp = gpar(col = "black"), column_names_gp = gpar(col = selected.colors[grep("^In", colnames(sub.scores))])) + Heatmap(sub.scores[perm, !grepl("^Ex|^In", colnames(sub.scores))], cluster_rows = F, cluster_columns = F, row_names_side = "left", name = "Glial", column_title = "Glial", rect_gp = gpar(col = "black"), column_names_gp = gpar(col = selected.colors[!grepl("^Ex|^In", colnames(sub.scores))])) + Heatmap(pheno[perm], col = c("lightgray", "red"), name = "Phenotype", rect_gp = gpar(col = "black")) + Heatmap(SZTR.mean[perm], name = "SZTR", rect_gp = gpar(col = "black"), col = inferno(500)) + Heatmap(PRS[perm], name = "PRS", rect_gp = gpar(col = "black"))
+
+
+storeFigure(ht, "TPS_heatmap_all", extension = "pdf", height = 24, width = 6, figures.path = figures.path)
+
+```
+
+
+# Compute relationship between SZTR and other variables
+```{r}
+metadata.tbl = colData(pb.logcounts)
+out <-lm(A17.signature~TPS+Phenotype+umis+mito_perc+Age+Gender+PMI+ Benzodiazepines + Anticonvulsants + AntipsychTyp + AntipsychAtyp + Antidepress, data = metadata.tbl)
+summary(out)
+
+
+sort(p.adjust(summary(out)$coefficients[-1,"Pr(>|t|)"], "fdr"))
+
+
+```
+
+
+
+# Comparison with PRS
+```{r}
+sample.df = data.frame(Label = pb.logcounts$ID, Phenotype = pb.logcounts$Phenotype, TPS = scale(pb.logcounts$TPS), A17 = scale(pb.logcounts$A17.signature), PRS = scale(pb.logcounts$PRS))
+sample.df = sample.df[pb.logcounts$POP.EL3SD == "EUR", ]
+
+
+require(ggstatsplot)
+gg = ggstatsplot::ggbetweenstats(
+    data = sample.df,
+    x = Phenotype,
+    y = PRS,
+    xlab = "Phenotype",
+    ylab = "Polygenic Risk Score (PRS)",
+    pairwise.display = "significant", # display only significant pairwise comparisons
+    p.adjust.method = "fdr", # adjust p-values for multiple tests using this method
+    ggtheme = ggthemes::theme_tufte(),
+    outlier.tagging = TRUE,
+    outlier.label = Label
+  ) + scale_color_manual(values = c("darkgrey", "red"))
+  
+storeFigure(gg, "PRS_vs_phenotype_EUR", extension = "pdf", figures.path = figures.path)
+
+
+sample.df$LabelPRS = ""
+mask = ((sample.df$TPS < -1) & (sample.df$Phenotype == "SZ")) | ((sample.df$TPS >1) & (sample.df$Phenotype != "SZ"))
+sample.df$LabelPRS[mask] = as.character(sample.df$Label[mask])
+
+require(ggpubr)
+gg = ggscatter(sample.df, x = "TPS", y = "PRS", 
+          color = "Phenotype",
+          palette = c("CON" = "lightgray", "SZ" = "red"),
+          label = "LabelPRS", repel = TRUE,
+          add = "reg.line",                                 # Add regression line
+          conf.int = TRUE,                                  # Add confidence interval
+          add.params = list(color = "blue",
+                            fill = "lightgray")
+          ) + geom_vline(xintercept = -1, linetype = "dashed", color="gray") + geom_vline(xintercept = 1, linetype = "dashed", color="gray")+
+  stat_cor(method = "pearson")#  +xlim(c(-2, 2)) + ylim(c(-2, 2))
+
+storeFigure(gg, "TPS_vs_PRS", extension = "pdf", figures.path = figures.path)
+
+
+```
+
+
+# Comparison with Phenotype
+```{r}
+sample.df = data.frame(Label = pb.logcounts$ID, Phenotype = pb.logcounts$Phenotype, TPS = scale(pb.logcounts$TPS), A17 = scale(pb.logcounts$A17.signature), A11 = scale(pb.logcounts$A11.signature), A29 = scale(pb.logcounts$A29.signature))
+
+require(ggstatsplot)
+gg = ggstatsplot::ggbetweenstats(
+    data = sample.df,
+    x = Phenotype,
+    y = TPS,
+    xlab = "Phenotype",
+    ylab = "Transcriptional Pathology Score (TPS)",
+    pairwise.display = "significant", # display only significant pairwise comparisons
+    p.adjust.method = "fdr", # adjust p-values for multiple tests using this method
+    ggtheme = ggthemes::theme_tufte(),
+    outlier.tagging = TRUE,
+    outlier.label = Label
+  ) + scale_color_manual(values = c("darkgrey", "red"))
+  
+storeFigure(gg, "TPS_vs_phenotype", extension = "pdf", figures.path = figures.path)
+
+
+
+require(ggstatsplot)
+gg = ggstatsplot::ggbetweenstats(
+    data = sample.df,
+    x = Phenotype,
+    y = A29,
+    xlab = "Phenotype",
+    ylab = "A29",
+    pairwise.display = "significant", # display only significant pairwise comparisons
+    p.adjust.method = "fdr", # adjust p-values for multiple tests using this method
+    ggtheme = ggthemes::theme_tufte(),
+    outlier.tagging = TRUE,
+    outlier.label = Label
+  ) + scale_color_manual(values = c("darkgrey", "red"))
+  
+storeFigure(gg, "A29_vs_phenotype", extension = "pdf", figures.path = figures.path)
+
+
+require(ggstatsplot)
+gg = ggstatsplot::ggbetweenstats(
+    data = sample.df,
+    x = Phenotype,
+    y = A17,
+    xlab = "Phenotype",
+    ylab = "A17",
+    pairwise.display = "significant", # display only significant pairwise comparisons
+    p.adjust.method = "fdr", # adjust p-values for multiple tests using this method
+    ggtheme = ggthemes::theme_tufte(),
+    outlier.tagging = TRUE,
+    outlier.label = Label
+  ) + scale_color_manual(values = c("darkgrey", "red"))
+  
+storeFigure(gg, "A17_vs_phenotype", extension = "pdf", figures.path = figures.path)
+
+
+require(ggstatsplot)
+gg = ggstatsplot::ggbetweenstats(
+    data = sample.df,
+    x = Phenotype,
+    y = A11,
+    xlab = "Phenotype",
+    ylab = "A11",
+    pairwise.display = "significant", # display only significant pairwise comparisons
+    p.adjust.method = "fdr", # adjust p-values for multiple tests using this method
+    ggtheme = ggthemes::theme_tufte(),
+    outlier.tagging = TRUE,
+    outlier.label = Label
+  ) + scale_color_manual(values = c("darkgrey", "red"))
+  
+storeFigure(gg, "A11_vs_phenotype", extension = "pdf", figures.path = figures.path)
+
+
+```
+
+# Compute GSEA enrichment wrt phenotype
+```{r}
+require(fgsea)
+
+SZ.inds = list(SZ = as.character(pb.logcounts$ID[which(pb.logcounts$Phenotype == "SZ")]))
+
+set.seed(0)
+v = pb.logcounts$TPS
+names(v) = pb.logcounts$ID
+all.enrichment = fgsea::fgsea(SZ.inds, v)
+gg=plotEnrichment(SZ.inds$SZ, v)+ labs(title=sprintf("TPS-vs-Phenotype (adjusted p-val = %.2e)", all.enrichment$padj))
+storeFigure(gg, "TPS_all_vs_Pheno_GSEA", extension = "pdf", figures.path = figures.path)
+
+
+set.seed(0)
+v = pb.logcounts$A11.signature
+names(v) = pb.logcounts$ID
+all.enrichment = fgsea::fgsea(SZ.inds, v, scoreType = "pos")
+gg = plotEnrichment(SZ.inds$SZ, v)+ labs(title=sprintf("A11-vs-Phenotype (adjusted p-val = %.2e)", all.enrichment$padj))
+storeFigure(gg, "A11_all_vs_Pheno_GSEA", extension = "pdf", figures.path = figures.path)
+
+
+
+
+set.seed(0)
+v = pb.logcounts$A17.signature
+names(v) = pb.logcounts$ID
+all.enrichment = fgsea::fgsea(SZ.inds, v, scoreType = "pos")
+gg = plotEnrichment(SZ.inds$SZ, v)+ labs(title=sprintf("A17-vs-Phenotype (adjusted p-val = %.2e)", all.enrichment$padj))
+storeFigure(gg, "A17_all_vs_Pheno_GSEA", extension = "pdf", figures.path = figures.path)
+
+
+
+set.seed(0)
+v = pb.logcounts$A29.signature
+names(v) = pb.logcounts$ID
+all.enrichment = fgsea::fgsea(SZ.inds, v, scoreType = "pos")
+gg = plotEnrichment(SZ.inds$SZ, v)+ labs(title=sprintf("A29-vs-Phenotype (adjusted p-val = %.2e)", all.enrichment$padj))
+storeFigure(gg, "A29_all_vs_Pheno_GSEA", extension = "pdf", figures.path = figures.path)
+
+
+```
+
+# Correlation of TPS and SZTR in each dataset, independently
+```{r}
+x = pb.logcounts$A17.signature
+z = (x - median(x)) / mad(x)
+
+mask = pb.logcounts$Cohort == "McLean"
+cor.test(pb.logcounts$A17.signature, pb.logcounts$TPS)
+cor.test(pb.logcounts$A17.signature[mask], pb.logcounts$TPS[mask])
+cor.test(pb.logcounts$A17.signature[!mask], pb.logcounts$TPS[!mask])
+
+
+# 	Pearson's product-moment correlation
+# 
+# data:  pb.logcounts$A17.signature and pb.logcounts$TPS
+# t = -10.511, df = 138, p-value < 2.2e-16
+# alternative hypothesis: true correlation is not equal to 0
+# 95 percent confidence interval:
+#  -0.7497761 -0.5632232
+# sample estimates:
+#        cor 
+# -0.6668185 
+# 
+# 
+# 	Pearson's product-moment correlation
+# 
+# data:  pb.logcounts$A17.signature[mask] and pb.logcounts$TPS[mask]
+# t = -6.7751, df = 46, p-value = 1.983e-08
+# alternative hypothesis: true correlation is not equal to 0
+# 95 percent confidence interval:
+#  -0.8251658 -0.5287768
+# sample estimates:
+#        cor 
+# -0.7067297 
+# 
+# 
+# 	Pearson's product-moment correlation
+# 
+# data:  pb.logcounts$A17.signature[!mask] and pb.logcounts$TPS[!mask]
+# t = -7.277, df = 90, p-value = 1.226e-10
+# alternative hypothesis: true correlation is not equal to 0
+# 95 percent confidence interval:
+#  -0.7232834 -0.4613185
+# sample estimates:
+#        cor 
+# -0.6086289 
+
+
+
+```
+
+
+
+# Filter samples
+```{r}
+ncells = apply(table(ACTIONet_summary$metadata$Labels, ACTIONet_summary$metadata$Individual), 2, as.numeric)
+rownames(ncells) = levels(ACTIONet_summary$metadata$Labels)
+
+rownames(ncells) = names(assays(pb.logcounts))
+
+cs = Matrix::colSums(ncells)
+ncells.freq = 100*scale(ncells, center = F, scale = cs)
+Ex.perc = (Matrix::colSums(ncells.freq[grepl("^Ex", rownames(ncells.freq)) & !grepl("^Ex-NRGN", rownames(ncells.freq)), ]))
+
+mask = (Ex.perc >= 10) & (Ex.perc <= 80)
+
+
+pb.logcounts.filtered = pb.logcounts [, mask]
+
+```
+
+
+```{r}
+require(ggpubr)
+df = data.frame(TPS = scale(pb.logcounts.filtered$TPS), SZTR = scale(pb.logcounts.filtered$A17.signature), Phenotype = pb.logcounts.filtered$Phenotype, ID = pb.logcounts.filtered$ID)
+df$Label = ""
+TPS.mask = ((df$TPS >1) & (df$Phenotype == "CON")) | ((df$TPS < -1) & (df$Phenotype == "SZ"))
+df$Label[TPS.mask] = as.character(df$ID[TPS.mask])
+
+
+gg = ggscatter(df, x = "TPS", y = "SZTR", 
+          color = "Phenotype",
+          palette = c("CON" = "lightgray", "SZ" = "red"),
+          label = "Label", repel = TRUE,
+          add = "reg.line",                                 # Add regression line
+          conf.int = TRUE,                                  # Add confidence interval
+          add.params = list(color = "blue",
+                            fill = "lightgray")
+          ) + geom_vline(xintercept = -1, linetype = "dashed", color="gray") + geom_vline(xintercept = 1, linetype = "dashed", color="gray")+
+  stat_cor(method = "pearson", label.x = -0.8)#  +xlim(c(-2, 2)) + ylim(c(-2, 2))
+
+
+storeFigure(gg, "TPS_vs_SZTR", extension = "pdf", figures.path = figures.path)
+
+
+```
+
+
+```{r}
+require(ggpubr)
+df = data.frame(TPS = scale(pb.logcounts.filtered$TPS), SZTR = scale(pb.logcounts.filtered$A17.signature), Phenotype = pb.logcounts.filtered$Phenotype, ID = pb.logcounts.filtered$ID, Cohort = pb.logcounts.filtered$Cohort)
+df$Label = ""
+TPS.mask = ((df$TPS >1) & (df$Phenotype == "CON")) | ((df$TPS < -1) & (df$Phenotype == "SZ"))
+df$Label[TPS.mask] = as.character(df$ID[TPS.mask])
+
+df1 = df[df$Cohort == "McLean", ]
+
+gg = ggscatter(df1, x = "TPS", y = "SZTR", 
+          color = "Phenotype",
+          palette = c("CON" = "lightgray", "SZ" = "red"),
+          label = "Label", repel = TRUE,
+          add = "reg.line",                                 # Add regression line
+          conf.int = TRUE,                                  # Add confidence interval
+          add.params = list(color = "blue",
+                            fill = "lightgray")
+          ) + geom_vline(xintercept = -1, linetype = "dashed", color="gray") + geom_vline(xintercept = 1, linetype = "dashed", color="gray")+
+  stat_cor(method = "pearson", label.x = -0.8)#  +xlim(c(-2, 2)) + ylim(c(-2, 2))
+
+storeFigure(gg, "TPS_vs_SZTR_McLean", extension = "pdf", figures.path = figures.path)
+
+
+df2 = df[df$Cohort != "McLean", ]
+
+gg = ggscatter(df2, x = "TPS", y = "SZTR", 
+          color = "Phenotype",
+          palette = c("CON" = "lightgray", "SZ" = "red"),
+          label = "Label", repel = TRUE,
+          add = "reg.line",                                 # Add regression line
+          conf.int = TRUE,                                  # Add confidence interval
+          add.params = list(color = "blue",
+                            fill = "lightgray")
+          ) + geom_vline(xintercept = -1, linetype = "dashed", color="gray") + geom_vline(xintercept = 1, linetype = "dashed", color="gray")+
+  stat_cor(method = "pearson", label.x = -0.8)#  +xlim(c(-2, 2)) + ylim(c(-2, 2))
+
+storeFigure(gg, "TPS_vs_SZTR_MtSinai", extension = "pdf", figures.path = figures.path)
+
+```
+
+
+
+```{r}
+require(ggpubr)
+df = data.frame(SZTR = scale(pb.logcounts.filtered$A17.signature), mito = scale(pb.logcounts.filtered$mito_perc), genes = scale(pb.logcounts.filtered$genes), umis = scale(pb.logcounts.filtered$umis), Phenotype = pb.logcounts.filtered$Phenotype)
+
+df$Label = ""
+TPS.mask = ((df$TPS >1) & (df$Phenotype == "CON")) | ((df$TPS < -1) & (df$Phenotype == "SZ"))
+df$Label[TPS.mask] = as.character(df$ID[TPS.mask])
+
+gg = ggscatter(df, x = "mito", y = "SZTR", 
+          color = "Phenotype",
+          palette = c("CON" = "lightgray", "SZ" = "red"),
+          label = "Label", repel = TRUE,
+          add = "reg.line",                                 # Add regression line
+          conf.int = TRUE,                                  # Add confidence interval
+          add.params = list(color = "blue",
+                            fill = "lightgray")
+          ) + geom_vline(xintercept = -1, linetype = "dashed", color="gray") + geom_vline(xintercept = 1, linetype = "dashed", color="gray")+
+  stat_cor(method = "pearson", label.x = -0.8)#  +xlim(c(-2, 2)) + ylim(c(-2, 2))
+
+storeFigure(gg, "Mito_vs_SZTR", extension = "pdf", figures.path = figures.path)
+
+
+gg = ggscatter(df, x = "genes", y = "SZTR", 
+          color = "Phenotype",
+          palette = c("CON" = "lightgray", "SZ" = "red"),
+          label = "Label", repel = TRUE,
+          add = "reg.line",                                 # Add regression line
+          conf.int = TRUE,                                  # Add confidence interval
+          add.params = list(color = "blue",
+                            fill = "lightgray")
+          ) + geom_vline(xintercept = -1, linetype = "dashed", color="gray") + geom_vline(xintercept = 1, linetype = "dashed", color="gray")+
+  stat_cor(method = "pearson", label.x = -0.8)#  +xlim(c(-2, 2)) + ylim(c(-2, 2))
+
+storeFigure(gg, "Genes_vs_SZTR", extension = "pdf", figures.path = figures.path)
+
+
+gg = ggscatter(df, x = "umis", y = "SZTR", 
+          color = "Phenotype",
+          palette = c("CON" = "lightgray", "SZ" = "red"),
+          label = "Label", repel = TRUE,
+          add = "reg.line",                                 # Add regression line
+          conf.int = TRUE,                                  # Add confidence interval
+          add.params = list(color = "blue",
+                            fill = "lightgray")
+          ) + geom_vline(xintercept = -1, linetype = "dashed", color="gray") + geom_vline(xintercept = 1, linetype = "dashed", color="gray")+
+  stat_cor(method = "pearson", label.x = -0.8)#  +xlim(c(-2, 2)) + ylim(c(-2, 2))
+
+storeFigure(gg, "UMI_vs_SZTR", extension = "pdf", figures.path = figures.path)
+
+
+```
+
+
+
+```{r}
+require(ggpubr)
+df = data.frame(A29 = scale(pb.logcounts.filtered$A29.signature), mito = scale(pb.logcounts.filtered$mito_perc), genes = scale(pb.logcounts.filtered$genes), umis = scale(pb.logcounts.filtered$umis), Phenotype = pb.logcounts.filtered$Phenotype)
+
+df$Label = ""
+TPS.mask = ((df$TPS >1) & (df$Phenotype == "CON")) | ((df$TPS < -1) & (df$Phenotype == "SZ"))
+df$Label[TPS.mask] = as.character(df$ID[TPS.mask])
+
+gg = ggscatter(df, x = "mito", y = "A29", 
+          color = "Phenotype",
+          palette = c("CON" = "lightgray", "SZ" = "red"),
+          label = "Label", repel = TRUE,
+          add = "reg.line",                                 # Add regression line
+          conf.int = TRUE,                                  # Add confidence interval
+          add.params = list(color = "blue",
+                            fill = "lightgray")
+          ) + geom_vline(xintercept = -1, linetype = "dashed", color="gray") + geom_vline(xintercept = 1, linetype = "dashed", color="gray")+
+  stat_cor(method = "pearson", label.x = -0.8)#  +xlim(c(-2, 2)) + ylim(c(-2, 2))
+
+storeFigure(gg, "Mito_vs_A29", extension = "pdf", figures.path = figures.path)
+
+
+gg = ggscatter(df, x = "genes", y = "A29", 
+          color = "Phenotype",
+          palette = c("CON" = "lightgray", "SZ" = "red"),
+          label = "Label", repel = TRUE,
+          add = "reg.line",                                 # Add regression line
+          conf.int = TRUE,                                  # Add confidence interval
+          add.params = list(color = "blue",
+                            fill = "lightgray")
+          ) + geom_vline(xintercept = -1, linetype = "dashed", color="gray") + geom_vline(xintercept = 1, linetype = "dashed", color="gray")+
+  stat_cor(method = "pearson", label.x = -0.8)#  +xlim(c(-2, 2)) + ylim(c(-2, 2))
+
+storeFigure(gg, "Genes_vs_A29", extension = "pdf", figures.path = figures.path)
+
+gg = ggscatter(df, x = "umis", y = "A29", 
+          color = "Phenotype",
+          palette = c("CON" = "lightgray", "SZ" = "red"),
+          label = "Label", repel = TRUE,
+          add = "reg.line",                                 # Add regression line
+          conf.int = TRUE,                                  # Add confidence interval
+          add.params = list(color = "blue",
+                            fill = "lightgray")
+          ) + geom_vline(xintercept = -1, linetype = "dashed", color="gray") + geom_vline(xintercept = 1, linetype = "dashed", color="gray")+
+  stat_cor(method = "pearson", label.x = -0.8)#  +xlim(c(-2, 2)) + ylim(c(-2, 2))
+
+storeFigure(gg, "UMI_vs_A29", extension = "pdf", figures.path = figures.path)
+
+
+```
+
+## Association of cell states and other variables
+```{r}
+states = cbind(pb.logcounts.filtered$A7.signature, pb.logcounts.filtered$A11.signature, pb.logcounts.filtered$A17.signature, pb.logcounts.filtered$A29.signature)
+stats = cbind(pb.logcounts.filtered$mito_perc, pb.logcounts.filtered$genes, pb.logcounts.filtered$umis, pb.logcounts.filtered$TPS)
+colnames(states) = c("A7_Ex-NRGN", "A11_Ex-Mt", "A17_Ex-SZTR", "A29_In-Mt")
+colnames(stats) = c("Mito", "Genes", "UMIs", "TPS")
+
+pvals = t(apply(states, 2, function(x) apply(stats, 2, function(y) cor.test(x, y)$p.value)))
+pvals.cor = matrix(p.adjust(pvals, method = "fdr"), nrow = ncol(states))
+rownames(pvals.cor) = c("A7_Ex-NRGN", "A11_Ex-Mt", "A17_Ex-SZTR", "A29_In-Mt")
+colnames(pvals.cor) = c("Mito", "Genes", "UMIs", "TPS")
+
+CC = cor(states, stats)
+RbBu.pal = colorRampPalette(rev(RColorBrewer::brewer.pal(9, "RdBu")))(200)
+
+require(corrplot)
+# pdf(file.path(figures.path, "Cellstates_vs_stats.pdf"), width = 4, height = 4)
+corrplot(CC, is.corr = T, method = "square", cl.length = 5, outline = T, sig.level = 0.01, p.mat = pvals.cor, insig = "label_sig", tl.col = "black", col = RbBu.pal)
+# dev.off()
+
+
+
+```
+## SZTR-specific genes vs DEs
+```{r}
+v = ACTIONet_summary$unified_feature_specificity[, 17]
+names(v) = rownames(ACTIONet_summary$unified_feature_specificity)
+
+set.seed(0)
+DE = c(DE.new$Up.genes, DE.new$Down.genes)
+names(DE) = c(paste("Up", names(DE.new$Up.genes), sep = "_"), paste("Down", names(DE.new$Down.genes), sep = "_"))
+DE.enrich = fgsea::fgsea(DE, v)
+
+storeDataset(DE.enrich, "SZTR_vs_DE", dataset.path = dataset.path)
+```
+
+## Identify shared genes
+```{r}
+mask = DE.enrich$padj < 0.05
+cc = table(unlist(DE.enrich$leadingEdge[mask]))
+shared.genes = sort(unique(names(cc)[cc > 1]))
+
+length(shared.genes)
+print(shared.genes)
+```
+
+## Identify subset that is also GWAS associated
+```{r}
+shared.genes.GWAS = intersect(shared.genes, PGC3.all.genes) # "BCL11A"   "BRINP2"   "BSN"      "CES4A"    "CUX2"     "DGKI"     "GABBR2"   "GRAMD1B"  "GRIN2A"   "IGSF9B"   "KCNB1"    "MPPED2"   "NDST3"    "PPP1R13B"
+
+# shared.genes.GWAS.gp = gProfileR::gprofiler(shared.genes.GWAS) #, hier_filtering = "moderate", src_filter = c("GO:BP"))
+
+
+require(ComplexHeatmap)
+X = -DE.new$DE.sc[shared.genes.GWAS, ]
+X[X < 0] = 0
+mask = (abs(DE.new$logFC[shared.genes.GWAS, ]) > 0.1) & (DE.new$logPvals[shared.genes.GWAS, ] > -log10(0.05))
+X[!mask] = 0
+
+spec = as.numeric(scale(log1p(ACTIONet_summary$unified_feature_specificity[, 17])))
+names(spec) = rownames(ACTIONet_summary$unified_feature_specificity)        
+spec = spec[shared.genes.GWAS]
+
+
+HMAGMA.tbl = loadDataset("HMAGMA_gene_scores", dataset.path = dataset.path)
+
+Hm = -log10(HMAGMA.tbl$P[match(shared.genes.GWAS, ids)])
+
+perm = order(spec, decreasing = T)
+
+ht = Heatmap(X[perm, ], cluster_rows = F, col = blues9, rect_gp = gpar(col = "black"), column_names_gp = gpar(col=colors), cluster_columns = F, name = "Differential", row_names_side = "left", show_row_dend = F) + Heatmap(as.matrix(spec[perm]), col = viridis::magma(11), rect_gp = gpar(col = "black"), name = "SZTR specificity", row_names_side = "left") + Heatmap(as.matrix(Hm[perm]), col = viridis::magma(11), rect_gp = gpar(col = "black"), name = "HMAGMA", row_names_side = "left")
+
+storeFigure(ht, "SZTR_vs_GWAS_heatmap", extension = "pdf", height = 4.5, figures.path = figures.path)
+
+```
+
+```{r}
+shared.genes.gp.filtered = gProfileR::gprofiler(shared.genes, hier_filtering = "moderate", src_filter = c("GO:BP", "GO:CC"))
+storeTable(list(gProfiler = shared.genes.gp.filtered), "SZTR_vs_DE_shared_genes_gProfiler_filtered", tables.path = tables.path)
+
+
+
+```
+

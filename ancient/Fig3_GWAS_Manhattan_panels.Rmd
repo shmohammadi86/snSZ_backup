@@ -1,0 +1,391 @@
+---
+title: "Fig3: H-MAGMA analysis"
+output: html_notebook
+---
+
+# Setup
+```{r include=FALSE}
+library(org.Hs.eg.db)
+
+source("manhattan.R")
+
+input.path = "~/results/input/"
+dataset.path = "~/results/datasets/"
+results.path = "~/results"
+figures.folder = "~/results/figures"
+
+export.path = "~/magma/genesets"
+MAGMA.path = "~/magma/"
+
+```
+
+# Load DE genes
+```{r include=FALSE}
+colors = readRDS(file.path(dataset.path, "celltype_colors.rds"))
+DE.new = readRDS(file.path(dataset.path, "DE_genes_pseudobulk_final.rds"))
+
+Up.genes = DE.new$Up.genes
+Down.genes = DE.new$Down.genes
+DE.scores = sign(DE.new$logFC) * (DE.new$logPvals) # tstats
+DE.scores.sig = DE.scores
+DE.scores.sig[(abs(DE.new$logFC) < 0.1) | (DE.new$logPvals < -log10(0.05))] = 0
+
+rdbu_fun = circlize::colorRamp2(c(-3, log10(0.05), 0, -log10(0.05), 3), rev(pals::brewer.rdbu(9)[seq(1, 9, by = 2)]))
+sorted.celltypes = intersect(names(colors), colnames(DE.sc))
+
+
+```
+
+# Map DE genes to the most dysregulated cell types
+
+```{r}
+top.scores = apply(DE.scores.sig, 1, function(x) {x[which.max(abs(x))]})
+top.scores = apply(DE.scores.sig, 1, function(x) {x[which.max(abs(x))]})
+
+
+top.celltype = apply(DE.scores.sig, 1, function(x) {colnames(DE.scores.sig)[which.max(abs(x))]})
+assigned.genes2celltype.df = data.frame(gene = rownames(DE.scores.sig), celltype = top.celltype, score = top.scores)
+assigned.genes2celltype.df$dir = "."
+assigned.genes2celltype.df$dir[assigned.genes2celltype.df$score > 0] = "Up"
+assigned.genes2celltype.df$dir[assigned.genes2celltype.df$score < 0] = "Down"
+
+```
+
+
+## Load significant variants and mapped genes
+```{r}
+PGC3.finemapped.genes.tbl = read.table(file.path(input.path, "Prioritised_PGC3_SZ_Genes.csv"), sep = "\t", header = T)
+PGC3.loci = read.table(file.path(input.path, "PGC3_SZ_significant_loci.csv"), sep = "\t", header = T)
+
+associated.genes = PGC3.loci$ENSEMBL.genes..all..clear.names.
+
+
+PGC3.all.genes.raw = sort(unique(unlist(sapply(PGC3.loci$ENSEMBL.genes..all..clear.names., function(str) {
+  if(str == "-") {
+    return("-")
+  }
+  gs = str_split(str, ",")[[1]]
+  
+  return(gs)
+}))))
+
+PGC3.all.genes = intersect(PGC3.all.genes.raw, rownames(DE.scores))
+
+
+  
+PGC3.loci$selected.genes = sapply(PGC3.loci$ENSEMBL.genes..all..clear.names., function(str) {
+  if(str == "-") {
+    return("-")
+  }
+  gs = intersect(str_split(str, ",")[[1]], assigned.genes2celltype.df$gene)
+  if(length(gs) == 0)
+    return("-")
+  else 
+    ss = abs(assigned.genes2celltype.df$score[match(gs, assigned.genes2celltype.df$gene)])
+    if(sum(abs(ss)) == 0)
+      return("-")
+    else
+      return(gs[which.max(ss)])
+})
+
+
+PGC3.loci.finemapped = PGC3.loci[PGC3.loci$top.index %in% PGC3.finemapped.genes.tbl$Index.SNP, ]
+
+PGC3.loci.finemapped$finemapped.gene = PGC3.finemapped.genes.tbl$Symbol.ID[match(PGC3.loci.finemapped$top.index, PGC3.finemapped.genes.tbl$Index.SNP)]
+```
+
+
+## Visualize the heatmap of DE for variants-associated genes
+```{r}
+PGC3.loci.finemapped.filtered = PGC3.loci.finemapped[PGC3.loci.finemapped$selected.genes != "-", ]
+PGC3.loci.finemapped.filtered$match.finemapping = PGC3.loci.finemapped.filtered$selected.genes == PGC3.loci.finemapped.filtered$finemapped.gene
+
+X = DE.scores[PGC3.loci.finemapped.filtered$selected.genes[PGC3.loci.finemapped.filtered$match.finemapping == T], ]
+X = X[rowSums(X !=0)>0, ]
+
+pdf(file.path(figures.folder, "PGC3_top_matched_genes_finemapped.pdf"), height = 12, width = 6)
+Heatmap(X[, sorted.celltypes[grepl("^Ex", sorted.celltypes)]], rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[grepl("^Ex", sorted.celltypes)]]), show_column_dend = F, show_row_dend = F, cluster_rows = T, cluster_columns = F, col = rdbu_fun, name = "Neuro (Ex)", column_title = "Neuro (Ex)") + Heatmap(X[, sorted.celltypes[grepl("^In", sorted.celltypes)]], rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[grepl("^In", sorted.celltypes)]]), cluster_columns = F, col = rdbu_fun, name = "Neuro (In)", column_title = "Neuro (In)") + Heatmap(X[, sorted.celltypes[!grepl("^Ex|^In", sorted.celltypes)]], rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[!grepl("^In|^Ex", sorted.celltypes)]]), show_column_dend = F, show_row_dend = F, cluster_columns = F, col = rdbu_fun, name = "Glial", column_title = "Glial")
+dev.off()
+
+
+# pdf(file.path(figures.folder,"GWAS_panels", "PGC3_top_matched_genes_finemapped_genome_order.pdf"), height = 12, width = 6)
+# Heatmap(X[, sorted.celltypes[grepl("^Ex", sorted.celltypes)]], rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[grepl("^Ex", sorted.celltypes)]]), show_column_dend = F, show_row_dend = F, cluster_rows = F, cluster_columns = F, col = rdbu_fun, name = "Neuro (Ex)", column_title = "Neuro (Ex)") + Heatmap(X[, sorted.celltypes[grepl("^In", sorted.celltypes)]], rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[grepl("^In", sorted.celltypes)]]), cluster_columns = F, col = rdbu_fun, name = "Neuro (In)", column_title = "Neuro (In)") + Heatmap(X[, sorted.celltypes[!grepl("^Ex|^In", sorted.celltypes)]], rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[!grepl("^In|^Ex", sorted.celltypes)]]), show_column_dend = F, show_row_dend = F, cluster_columns = F, col = rdbu_fun, name = "Glial", column_title = "Glial")
+# dev.off()
+
+
+
+X = DE.scores[PGC3.loci.finemapped.filtered$selected.genes, ]
+X = X[rowSums(X !=0)>0, ]
+
+pdf(file.path(figures.folder, "PGC3_top_matched_genes.pdf"), height = 18, width = 6)
+Heatmap(X[, sorted.celltypes[grepl("^Ex", sorted.celltypes)]], rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[grepl("^Ex", sorted.celltypes)]]), show_column_dend = F, show_row_dend = F, cluster_rows = T, cluster_columns = F, col = rdbu_fun, name = "Neuro (Ex)", column_title = "Neuro (Ex)") + Heatmap(X[, sorted.celltypes[grepl("^In", sorted.celltypes)]], rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[grepl("^In", sorted.celltypes)]]), cluster_columns = F, col = rdbu_fun, name = "Neuro (In)", column_title = "Neuro (In)") + Heatmap(X[, sorted.celltypes[!grepl("^Ex|^In", sorted.celltypes)]], rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[!grepl("^In|^Ex", sorted.celltypes)]]), show_column_dend = F, show_row_dend = F, cluster_columns = F, col = rdbu_fun, name = "Glial", column_title = "Glial")
+dev.off()
+
+pdf(file.path(figures.folder, "GWAS_panels", "PGC3_top_matched_genes_genome_order.pdf"), height = 18, width = 6)
+Heatmap(X[, sorted.celltypes[grepl("^Ex", sorted.celltypes)]], rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[grepl("^Ex", sorted.celltypes)]]), show_column_dend = F, show_row_dend = F, cluster_rows = F, cluster_columns = F, col = rdbu_fun, name = "Neuro (Ex)", column_title = "Neuro (Ex)") + Heatmap(X[, sorted.celltypes[grepl("^In", sorted.celltypes)]], rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[grepl("^In", sorted.celltypes)]]), cluster_columns = F, col = rdbu_fun, name = "Neuro (In)", column_title = "Neuro (In)") + Heatmap(X[, sorted.celltypes[!grepl("^Ex|^In", sorted.celltypes)]], rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[!grepl("^In|^Ex", sorted.celltypes)]]), show_column_dend = F, show_row_dend = F, cluster_columns = F, col = rdbu_fun, name = "Glial", column_title = "Glial")
+dev.off()
+
+```
+
+# Export individual columns 
+```{r}
+X = as.matrix(assigned.genes2celltype.df$score[match(PGC3.loci.finemapped.filtered$selected.genes, assigned.genes2celltype.df$gene)])
+pdf(file.path(figures.folder, "GWAS_panels", "PGC3_mapped_ordered_genes_topMap_notlabeled.pdf"), height = 42, width = 1.5)
+Heatmap(X, rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[grepl("^Ex", sorted.celltypes)]]), show_column_dend = F, show_row_dend = F, cluster_rows = F, cluster_columns = F, col = rdbu_fun, name = "Enrichment")
+dev.off()
+
+rownames(X) = PGC3.loci.finemapped.filtered$selected.genes
+pdf(file.path(figures.folder, "GWAS_panels", "PGC3_mapped_ordered_genes_topMap_labeled.pdf"), height = 42, width = 2.5)
+Heatmap(X, rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[grepl("^Ex", sorted.celltypes)]]), show_column_dend = F, show_row_dend = F, cluster_rows = F, cluster_columns = F, col = rdbu_fun, name = "Enrichment", row_names_side = "left")
+dev.off()
+
+
+
+X = as.matrix(factor(assigned.genes2celltype.df$celltype[match(PGC3.loci.finemapped.filtered$selected.genes, assigned.genes2celltype.df$gene)], levels = names(colors)))
+X[assigned.genes2celltype.df$score[match(PGC3.loci.finemapped.filtered$selected.genes, assigned.genes2celltype.df$gene)] == 0, 1] = NA
+pdf(file.path(figures.folder, "GWAS_panels", "PGC3_mapped_ordered_genes_topMap_celltype.pdf"), height = 42, width = 2.5)
+Heatmap(X, rect_gp = gpar(col = "black"), cluster_rows = F, cluster_columns = F, col = colors, name = "Celltype", na_col = "black")
+dev.off()
+
+rownames(X) = as.character(assigned.genes2celltype.df$celltype[match(PGC3.loci.finemapped.filtered$selected.genes, assigned.genes2celltype.df$gene)])
+rownames(X)[assigned.genes2celltype.df$score[match(PGC3.loci.finemapped.filtered$selected.genes, assigned.genes2celltype.df$gene)] == 0] = NA
+pdf(file.path(figures.folder, "GWAS_panels", "PGC3_mapped_ordered_genes_topMap_celltype_withlabels.pdf"), height = 42, width = 4.5)
+Heatmap(X, rect_gp = gpar(col = "black"), cluster_rows = F, cluster_columns = F, col = colors, name = "Celltype", row_names_side = "left", na_col = "black")
+dev.off()
+
+
+```
+
+
+# Plot Manhattan
+```{r}
+SCZ.GWAS = read.csv(file.path(input.path, 'PGC3_SCZ_wave3_public.v2.tsv'), sep = "\t")
+val = as.numeric(SCZ.GWAS$CHR)
+SCZ.GWAS=SCZ.GWAS[!is.na(val), ]
+SCZ.GWAS$CHR = val[!is.na(val)]
+
+SCZ.GWAS.annotated = SCZ.GWAS
+
+idx = match(PGC3.loci.finemapped.filtered$top.index, SCZ.GWAS.annotated$SNP)
+
+SCZ.GWAS.annotated$Labels = ""
+SCZ.GWAS.annotated$Labels.col = "#ffffff"
+
+
+SCZ.GWAS.annotated$Labels[idx] = paste("(", SCZ.GWAS.annotated$SNP[idx], ")-(", PGC3.loci.finemapped.filtered$selected.genes, ")-(", assigned.genes2celltype.df$celltype[match(PGC3.loci.finemapped.filtered$selected.genes, assigned.genes2celltype.df$gene)], ")-(", assigned.genes2celltype.df$dir[match(PGC3.loci.finemapped.filtered$selected.genes, assigned.genes2celltype.df$gene)], ")", sep = "")
+SCZ.GWAS.annotated$Labels.col[idx] = colors[assigned.genes2celltype.df$celltype[match(PGC3.loci.finemapped.filtered$selected.genes, assigned.genes2celltype.df$gene)]]
+
+
+
+# iii = which(SCZ.GWAS.annotated$Labels != "")
+
+```
+
+## Compute Manhattan
+```{r}
+Dd = manhattan.compute(SCZ.GWAS.annotated, cex = 0.15, cex.axis = 0.5, suggestiveline = F, ylim = c(0, -log10(min(sig.SCZ.GWAS$P))), annotateLabels = T)
+
+```
+
+## Plot Manhattan without Labels
+```{r}
+
+iii = c(which(Dd$Labels != ""), which.max(Dd$pos))
+Xd = Dd[iii, ]
+
+pdf("~/PFC_v3/figures/SCZ_Manh_sig_aligned.pdf", width = 12, height = 6)
+# png("~/PFC_v3/figures/SCZ_Manh_sig_aligned_annotatede.png", width = 2400, height = 1200, res = 300)
+manhattan.plot(Xd, cex = 0.15, cex.axis = 0.5, suggestiveline = F, ylim = c(0, -log10(min(SCZ.GWAS$P))), annotateLabels = NULL)
+dev.off()
+
+
+pdf("SCZ_Manh_sigOnly_aligned_v3.pdf", width = 12, height = 6)
+# png("SCZ_Manh_all_aligned.png", width = 2400, height = 1200, res = 300)
+manhattan.plot(X, cex = 0.15, cex.axis = 0.5, suggestiveline = F, ylim = c(0, -log10(min(SCZ.GWAS$P))), annotateLabels = NULL)
+dev.off()
+
+```
+
+## Plot Manhattan with Labels
+```{r}
+iii = c(which(Dd$Labels != ""), which.max(Dd$pos))
+Xd = Dd[iii, ]
+
+gg = as.character(sapply(Xd$Labels[-nrow(Xd)], function(str) {
+  x = str_split(str, "-")[[1]][[2]]
+  gg = substr(x, 2, str_length(x)-1)
+}))
+
+x = assigned.genes2celltype.df$score[match(gg, assigned.genes2celltype.df$gene)]
+
+
+NA_col = "#eeeeee"
+grad_palette = (grDevices::colorRampPalette(rev(RColorBrewer::brewer.pal(n = 7, name = "RdBu"))))(100)
+col_func = (scales::col_bin(palette = grad_palette, domain = NULL, na.color = NA_col, bins = 7))
+Xd$Point.col = plot_fill_col = c(col_func(x), "#000000")
+
+Xd$FullLabels = Xd$Labels
+Xd$Labels = c(gg, "")
+
+
+
+
+pdf(file.path(figures.folder, "GWAS_panels", "SCZ_Manh_sig_aligned.pdf"), width = 12, height = 6)
+manhattan.plot(Xd, cex = 0.15, cex.axis = 0.5, suggestiveline = F, ylim = c(0, -log10(min(SCZ.GWAS$P))), annotateLabels = NULL)
+dev.off()
+
+pdf(file.path(figures.folder, "GWAS_panels", "SCZ_Manh_sig_aligned_labels.pdf"), width = 12, height = 6)
+manhattan.plot(Xd, cex = 0.15, cex.axis = 0.5, suggestiveline = F, ylim = c(0, -log10(min(SCZ.GWAS$P))), annotateLabels = T)
+dev.off()
+
+```
+
+```{r}
+tbl = read.table("~/magma/hmagma/hmagmaAdultBrain__sz3/hmagmaAdultBrain__sz3.genes.out", header = T)
+suppressWarnings(ids <- AnnotationDbi::mapIds(org.Hs.eg.db, keys = tbl$GENE, keytype = "ENSEMBL", column = "SYMBOL", multiVals = "first"))
+ids[is.na(ids)] = ""
+
+scores = rep(0, nrow(PGC3.loci.finemapped.filtered))
+ii = match(PGC3.loci.finemapped.filtered$selected.genes, ids)
+scores[!is.na(ii)] = -log10(tbl$P[ii[!is.na(ii)]])
+
+
+PurPal = colorRampPalette(RColorBrewer::brewer.pal(9, "Purples"))(200)
+
+X = as.matrix(scores)
+pdf(file.path(figures.folder, "GWAS_panels", "HMAGMA_scores.pdf"), height = 42, width = 1.5)
+Heatmap(X, rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[grepl("^Ex", sorted.celltypes)]]), show_column_dend = F, show_row_dend = F, cluster_rows = F, cluster_columns = F, col = PurPal, name = "Enrichment", show_row_names = F)
+dev.off()
+
+rownames(X) = PGC3.loci.finemapped.filtered$selected.genes
+pdf(file.path(figures.folder, "GWAS_panels", "HMAGMA_scores_labeled.pdf"), height = 42, width = 2.5)
+Heatmap(X, rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[grepl("^Ex", sorted.celltypes)]]), show_column_dend = F, show_row_dend = F, cluster_rows = F, cluster_columns = F, col = PurPal, name = "Enrichment", row_names_side = "left")
+dev.off()
+
+
+```
+
+```{r}
+ABC = read.table(file.path(input.path, "AllPredictions.AvgHiC.ABC0.015.minus150.ForABCPaperV3.txt"), header = T, sep = "\t")
+
+ABC.celltypes = sort(unique(ABC$CellType))
+
+```
+
+
+```{r}
+COLOC = read.table(file.path(input.path, "coloc_result_for_meta-eQTL_SCZ3-GWAS.txt"), header = T, sep = "\t")
+
+
+gg = sapply(COLOC$Gene_eQTLorder.Trait, function(x) str_split(x, "_")[[1]][[1]])
+
+poster = sapply(PGC3.loci.finemapped.filtered$ENSEMBL.genes..all..ENSEMBL.IDs., function(x) {
+  idx = match(str_split(x, ",")[[1]], gg)
+  if(sum(!is.na(idx)) == 0)
+    return(NA)
+  else
+    max(COLOC$H4_PP[idx[!is.na(idx)]])
+})
+names(poster) = PGC3.loci.finemapped.filtered$selected.genes
+
+
+```
+
+
+
+```{r}
+# tbl = read.table("~/magma/hmagma/hmagmaAdultBrain__sz3/hmagmaAdultBrain__sz3.genes.out", header = T)
+# suppressWarnings(ids <- AnnotationDbi::mapIds(org.Hs.eg.db, keys = tbl$GENE, keytype = "ENSEMBL", column = "SYMBOL", multiVals = "first"))
+# ids[is.na(ids)] = ""
+
+rr = match(PGC3.loci.finemapped.filtered$top.index, SCZ.GWAS$SNP)
+scores = round(-log10(SCZ.GWAS$P[rr]), 1)
+names(scores) = PGC3.loci.finemapped.filtered$top.index
+
+
+
+
+# scores = rep(0, nrow(PGC3.loci.finemapped.filtered))
+# ii = match(PGC3.loci.finemapped.filtered$selected.genes, ids)
+# scores[!is.na(ii)] = -log10(tbl$P[ii[!is.na(ii)]])
+
+
+pdf(file.path(figures.folder, "GWAS_panels", "SNP_scores_labeled_v3.pdf"), height = 42, width = 2.5)
+Heatmap(as.matrix(scores), cluster_rows = F, name = "enrichment", col = PurPal,
+    cell_fun = function(j, i, x, y, width, height, fill) {
+        grid.text(sprintf("%.1f", as.matrix(scores)[i, j]), x, y, gp = gpar(fontsize = 10))
+})
+dev.off()
+
+
+
+mask = as.numeric(PGC3.loci.finemapped.filtered$match.finemapping)
+names(mask) = PGC3.loci.finemapped.filtered$finemapped.gene
+
+pdf(file.path(figures.folder, "GWAS_panels", "finemapped_genes.pdf"), height = 42, width = 2.8)
+Heatmap(as.matrix(mask), cluster_rows = F, rect_gp = gpar(col = "black"), col = c("white", "gray"), name = "Fine-mapped")
+dev.off()
+
+
+
+
+# PGC3.loci.finemapped.filtered$top.P[[15]] = sprintf('%e', 0.000000015)
+
+scores = sapply(PGC3.loci.finemapped.filtered$top.P, function(x) {
+  #x = round(-log10(as.numeric(x)))
+  #if(is.na(x))
+    x = as.numeric(str_split(x, "-")[[1]][[2]])
+    # x[!is.na(x)]
+})
+
+names(scores) = PGC3.loci.finemapped.filtered$top.index
+
+PurPal = colorRampPalette(RColorBrewer::brewer.pal(9, "Purples"))(200)
+
+X = as.matrix(scores)
+pdf(file.path(figures.folder, "GWAS_panels", "SNP_scores.pdf"), height = 42, width = 1.5)
+Heatmap(X, rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[grepl("^Ex", sorted.celltypes)]]), show_column_dend = F, show_row_dend = F, cluster_rows = F, cluster_columns = F, col = PurPal, name = "Enrichment", show_row_names = F)
+dev.off()
+
+pdf(file.path(figures.folder, "GWAS_panels", "SNP_scores_labeled.pdf"), height = 42, width = 2.5)
+Heatmap(X, rect_gp = gpar(col = "black"), column_names_gp = gpar(col = colors[sorted.celltypes[grepl("^Ex", sorted.celltypes)]]), show_column_dend = F, show_row_dend = F, cluster_rows = F, cluster_columns = F, col = PurPal, name = "Enrichment", row_names_side = "left")
+dev.off()
+
+```
+
+
+```{r}
+SCZ.GWAS.annotated.ext = SCZ.GWAS
+
+idx = match(PGC3.loci.finemapped$top.index, SCZ.GWAS.annotated.ext$SNP)
+mask = (!is.na(idx)) & (PGC3.loci.finemapped$selected.genes == "-")
+DF = PGC3.loci.finemapped[mask, ]
+idx = idx[mask]
+
+
+SCZ.GWAS.annotated.ext$Labels = ""
+SCZ.GWAS.annotated.ext$Labels.col = "#ffffff"
+
+
+SCZ.GWAS.annotated.ext$Labels[idx] = DF$finemapped.gene # paste("(", SCZ.GWAS.annotated$SNP[idx], ")-(", PGC3.loci.finemapped.filtered$selected.genes, ")-(", assigned.genes2celltype.df$celltype[match(PGC3.loci.finemapped.filtered$selected.genes, assigned.genes2celltype.df$gene)], ")-(", assigned.genes2celltype.df$dir[match(PGC3.loci.finemapped.filtered$selected.genes, assigned.genes2celltype.df$gene)], ")", sep = "")
+SCZ.GWAS.annotated.ext$Labels.col[idx] = colors[assigned.genes2celltype.df$celltype[match(DF$selected.genes, assigned.genes2celltype.df$gene)]]
+
+Dd.ext = manhattan.compute(SCZ.GWAS.annotated.ext, cex = 0.15, cex.axis = 0.5, suggestiveline = F, ylim = c(0, -log10(min(sig.SCZ.GWAS$P))), annotateLabels = T)
+
+
+
+iii = c(which(Dd.ext$Labels != ""), which.max(Dd.ext$pos))
+Xd = Dd.ext[iii, ]
+
+Xd$Point.col = "#000000"
+
+
+pdf(file.path(figures.folder, "GWAS_panels", "SCZ_Manh_sig_aligned.pdf"), width = 12, height = 6)
+manhattan.plot(Xd, cex = 0.15, cex.axis = 0.5, suggestiveline = F, ylim = c(0, -log10(min(SCZ.GWAS$P))), annotateLabels = NULL)
+dev.off()
+
+pdf(file.path(figures.folder, "GWAS_panels", "SCZ_Manh_sig_aligned_labels_finemapped.pdf"), width = 12, height = 6)
+manhattan.plot(Xd, cex = 0.15, cex.axis = 0.5, suggestiveline = F, ylim = c(0, -log10(min(SCZ.GWAS$P))), annotateLabels = T)
+dev.off()
+
+```

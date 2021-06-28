@@ -1,0 +1,75 @@
+---
+title: "Identify genes that are shared across SZ+BD in a cell type-specific manner"
+output: html_notebook
+---
+
+```{r}
+L45_LRRK1.DE.genes = sort(unique(union(DE.new$Up.genes$`Ex-L45_LRRK1`, DE.new$Down.genes$`Ex-L45_LRRK1`)))
+
+require(fgsea)
+
+require(stringr)
+# SZ.hmagma.tbl = read.csv("~/magma/hmagma/hmagmaAdultBrain__sz3/hmagmaAdultBrain__sz3.genes.out", sep = " ")
+SZ.hmagma.lines = readLines(file("~/magma/hmagma/hmagmaAdultBrain__sz3/hmagmaAdultBrain__sz3.genes.out", "r", blocking = T))
+SZ.hmagma.lines = str_split(SZ.hmagma.lines, "\n")
+SZ.enrichment = sapply(SZ.hmagma.lines[-1], function(x) {
+  parts = str_split(x, " ")[[1]]
+  parts = parts[parts != ""]
+  v = -log10(as.numeric(parts[length(parts)]))
+  names(v) = parts[[1]]
+  return(v)
+})
+
+suppressWarnings(ids <- AnnotationDbi::mapIds(org.Hs.eg.db, keys = names(SZ.enrichment), keytype = "ENSEMBL", column = "SYMBOL", multiVals = "first"))
+mask = !is.na(ids)
+SZ.enrichment = SZ.enrichment[!is.na(ids)]
+names(SZ.enrichment) = ids[!is.na(ids)]
+
+
+
+BD.hmagma.lines = readLines(file("~/magma/hmagma/hmagmaAdultBrain__bip2/hmagmaAdultBrain__bip2.genes.out", "r", blocking = T))
+BD.hmagma.lines = str_split(BD.hmagma.lines, "\n")
+BD.enrichment = sapply(BD.hmagma.lines[-1], function(x) {
+  parts = str_split(x, " ")[[1]]
+  parts = parts[parts != ""]
+  v = -log10(as.numeric(parts[length(parts)]))
+  names(v) = parts[[1]]
+  return(v)
+})
+
+library(org.Hs.eg.db)
+suppressWarnings(ids <- AnnotationDbi::mapIds(org.Hs.eg.db, keys = names(BD.enrichment), keytype = "ENSEMBL", column = "SYMBOL", multiVals = "first"))
+mask = !is.na(ids)
+BD.enrichment = BD.enrichment[!is.na(ids)]
+names(BD.enrichment) = ids[!is.na(ids)]
+
+
+common.genes = intersect(rownames(DE.sc), intersect(names(BD.enrichment), names(SZ.enrichment)))
+
+En.df = data.frame(gene = common.genes, DE = DE.sc[common.genes, "Ex-L45_LRRK1"], BD = BD.enrichment[common.genes], SZ = SZ.enrichment[common.genes])
+En.df$absDE = abs(En.df$DE)
+En.df$joint = combine.logPvals(t(cbind(En.df$SZ, En.df$BD)))
+
+DE.genes = list(L45_LRRK1 = L45_LRRK1.DE.genes)
+
+# v.SZ = En.df$SZ
+# names(v.SZ) = En.df$gene
+# sz.enrichment = fgsea::fgsea(DE.genes, v.SZ, scoreType = "pos")
+# SZ.vs.DE.top = sz.enrichment$leadingEdge[[1]]
+# 
+# 
+# v.BD = En.df$BD
+# names(v.BD) = En.df$gene
+# bd.enrichment = fgsea::fgsea(DE.genes, v.BD, scoreType = "pos")
+# BD.vs.DE.top = bd.enrichment$leadingEdge[[1]]
+
+
+v.SZ = En.df$joint
+names(v.SZ) = En.df$gene
+sz.enrichment = fgsea::fgsea(DE.genes, v.SZ, scoreType = "pos")
+SZ.vs.DE.top = sz.enrichment$leadingEdge[[1]]
+
+# intersect(BD.vs.DE.top, SZ.vs.DE.top)
+
+```
+

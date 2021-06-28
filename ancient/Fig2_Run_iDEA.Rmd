@@ -1,0 +1,170 @@
+---
+title: "Run iDEA Analysis of DE genes"
+output: html_notebook
+---
+
+# Setup
+```{r include=FALSE}
+require(ACTIONet)
+require(stringr)
+require(ComplexHeatmap)
+require(iDEA)
+
+dataset.path = "~/results/datasets/"
+results.path = "~/results"
+figures.folder = "~/results/figures"
+input.folder = "~/results/input"
+
+
+```
+
+
+
+
+
+```{r}
+ACTIONet_summary = readr::read_rds(file.path(dataset.path, "ACTIONet_summary_filtered_individuals.rds"))
+
+pb.logcounts = readr::read_rds(file.path(dataset.path, "PB_mean_logcounts_final.RDS"))
+
+color.df = readRDS(file.path(dataset.path, "celltype_colors.rds"))
+
+colors = color.df$color
+names(colors) = color.df$celltype
+
+```
+
+
+```{r}
+resDE = readr::read_rds(file.path(dataset.path, "Cohort_specific_DE_results_final.rds"))
+
+filtered.tables = readr::read_rds(file.path(dataset.path, "individual_diff_results_filtered.rds"))
+
+combined.analysis.tables = readr::read_rds(file.path(dataset.path, "meta_analysis_diff_results.rds"))
+
+DE.new = readr::read_rds(file.path(dataset.path, "DE_genes_pseudobulk_final.rds"))
+
+```
+
+
+```{r}
+iDEA.summary.tables = lapply(combined.analysis.tables, function(res_DE) {
+  ## Assume you have obtained the DE results from i.e. zingeR, edgeR or MAST with the data frame res_DE (column: pvalue and LogFC)
+  pvalue <- res_DE$P.Value #### the pvalue column
+  zscore <- qnorm(pvalue/2.0, lower.tail=FALSE) #### convert the pvalue to z-score
+  beta <- res_DE$logFC ## effect size
+  se_beta <- abs(beta/zscore) ## to approximate the standard error of beta
+  beta_var = se_beta^2  ### square 
+  summary = data.frame(beta = beta,beta_var = beta_var)
+  ## add the gene names as the rownames of summary
+  rownames(summary) = res_DE$gene ### or the gene id column in the res_DE results
+  return(summary)  
+})
+
+
+```
+
+
+```{r}
+data("gProfilerDB_human")
+BP = gProfilerDB_human$SYMBOL$`GO:BP`
+cs = fast_column_sums(BP)
+mask = (cs >= 10) & (cs <= 1000)
+BP = BP[, mask]
+row.mask = rownames(BP) %in% rownames(pb.logcounts)
+BP = BP[row.mask, ]
+BP.df = as.data.frame(BP)
+```
+
+
+
+```{r}
+data("humanGeneSets")
+data("humanGeneSetsInfo")
+mask = humanGeneSetsInfo$gsetBioName %in% c("GO biological process", "KEGG", "Reactome")
+humanGeneSets.subset = humanGeneSets[, mask]
+humanGeneSets.subset = humanGeneSets.subset[intersect(rownames(humanGeneSets.subset), rownames(pb.logcounts)), ]
+
+
+
+```
+
+```{r}
+plot(density(idea.res$`Ex-L4_MYLK`@BMA_pip$BMA_pip))
+
+sum(idea.res$`Ex-L6_CC_SEMA3A`@BMA_pip$BMA_pip >0.5)
+
+
+DF = (idea.res$`Ex-L6_CC_SEMA3A`@gsea)
+
+```
+
+
+
+```{r}
+idea.res = vector("list", length(iDEA.summary.tables))
+names(idea.res) = names(iDEA.summary.tables) 
+for(i in 1:length(iDEA.summary.tables)) {
+  print(names(idea.res)[[i]])
+  summary_data = iDEA.summary.tables[[i]]
+  
+  idea <- CreateiDEAObject(summary_data, humanGeneSets.subset, max_var_beta = 100, min_precent_annot = 0.0025, num_core=46)
+
+  idea <- iDEA.fit(idea,
+                   fit_noGS=FALSE,
+  	         init_beta=NULL, 
+  	         init_tau=c(-2,0.5),
+  	         min_degene=5,
+  	         em_iter=15,
+  	         mcmc_iter=1000, 
+  	         fit.tol=1e-5,
+                   modelVariant = F,
+  	         verbose=TRUE) 
+  idea <- iDEA.louis(idea)
+  idea <- iDEA.BMA(idea)
+  idea.res[[i]] = idea
+}
+
+readr::write_rds(idea.res, "~/results/datasets/idea_output.rds")
+
+
+```
+
+
+```{r}
+idea.res = readr::read_rds("~/results/datasets/idea_output.rds")
+
+DF = idea.res$`Ex-L45_LRRK1`@gsea
+
+DF2 = idea.res$`In-PV_Basket`@gsea
+
+DF3 = idea.res$`Ex-L23`@gsea
+
+
+require(simplifyEnrichment)
+simplifyEnrichment::simplifyGO()
+
+
+```
+
+
+
+
+```{r}
+x = -log10(combined.analysis.tables$`Ex-L45_LRRK1`$P.Value)
+names(x) = combined.analysis.tables$`Ex-L45_LRRK1`$gene
+
+y = idea.res$`Ex-L45_LRRK1`@BMA_pip$BMA_pip
+names(y) = rownames(idea.res$`Ex-L45_LRRK1`@BMA_pip)
+
+z = x[names(y)]
+
+cor(z, y)
+
+# DF = idea.res$`Ex-L45_LRRK1`
+# gg = lapply(idea.res, function(DF) rownames(DF@BMA_pip)[DF@BMA_pip$BMA_pip > 0.5])
+
+X = DF@gsea
+
+```
+

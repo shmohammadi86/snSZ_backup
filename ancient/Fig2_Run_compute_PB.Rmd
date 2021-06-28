@@ -1,0 +1,349 @@
+---
+title: "Perform DE analysis"
+output: html_notebook
+---
+
+# Setup
+```{r include=FALSE}
+require(ACTIONet)
+require(stringr)
+require(ComplexHeatmap)
+
+require(muscat)
+require(edgeR)
+require(limma)
+
+dataset.path = "~/results/datasets/"
+results.path = "~/results"
+figures.folder = "~/results/figures"
+
+
+```
+
+```{r}
+ace = readr::read_rds("~/results/ACTIONet_reunified.rds")
+sce = as(ace, "SingleCellExperiment")
+
+```
+
+```{r}
+pb.logcounts.old = readr::read_rds(file.path(dataset.path, "PB_sce_final.rds"))
+
+```
+
+
+```{r}
+
+```
+
+
+```{r}
+ACTIONet_summary = readr::read_rds("~/results/datasets/ACTIONet_summary.rds")
+
+ll = levels(ACTIONet_summary$metadata$Labels)
+ll = c(ll[1:25], "Vasc")
+Labels = as.character(ACTIONet_summary$metadata$Labels)
+
+Labels[Labels %in% c("Endo", "Pericytes")] = "Vasc"
+
+SST.cells = which(ACTIONet_summary$metadata$Labels == "In-SST")
+SST.subtypes = apply(ACTIONet_summary$H_unified[SST.cells, c(16, 21, 25)], 1, which.max)
+SST.l = c("In-SST_STK32A", "In-SST_CALB1", "In-SST_MEPE")
+SST.subtypes = SST.l[SST.subtypes]
+Labels[SST.cells] = SST.subtypes
+Labels.f=factor(Labels, c(ll[1:20], SST.l, ll[22:26]))
+
+plot.ACTIONet(ace, Labels.f)
+
+```
+
+```{r}
+X = ACTIONet_summary$unified_feature_specificity[, c(16, 21, 25)]
+plot.top.k.features(doubleNorm(X), 10)
+
+Heatmap(X[c("TH", "TAC1", "TAC3", "STK32A", "CALB1", "NOS1", "CALB2", "CUX2"), ])
+
+```
+
+
+```{r}
+visualize.markers(ace, c("SST", "PVALB", "LYPD6", "LYPD6B", "MEPE", "CUX2", "CALB1", "STK32A"))
+
+```
+```{r}
+expr = impute.genes.using.ACTIONet(ace, c("CALB1", "CUX2"), alpha_val = 0.99)
+idx = which(ace$Labels.final == "In-SST")
+data = as.data.frame(scale(expr[idx, ]))
+mask = (df$CALB1 > 1) & (df$CUX2 > 1)
+SST_martin = as.numeric(1:ncol(ace) %in% idx[mask])
+plot.ACTIONet(ace, SST_martin)
+
+
+
+ggplot(data, aes(x=CALB1, y=CUX2) ) +
+  stat_density_2d(aes(fill = ..density..), geom = "raster", contour = FALSE) +
+  scale_fill_distiller(palette=4, direction=-1) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  theme(
+    legend.position='none'
+  )
+
+```
+```{r}
+
+plot.ACTIONet(ace, as.numeric(mask))
+```
+
+```{r}
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+sce$cluster_id = Labels.f
+sce$group_id = ACTIONet_summary$metadata$Phenotype
+sce$sample_id = ACTIONet_summary$metadata$Individual
+
+library(muscat)
+sce$id <- paste0(sce$Phenotype, sce$sample_id)
+(sce <- prepSCE(sce,
+    kid = "cluster_id", # subpopulation assignments
+    gid = "group_id",  # group IDs (ctrl/stim)
+    sid = "sample_id",   # sample IDs (ctrl/stim.1234)
+    drop = TRUE))  # drop all other colData columns
+
+pb.logcounts <- aggregateData(sce,
+    assay = "logcounts", fun = "mean",
+    by = c("cluster_id", "sample_id"))
+
+readr::write_rds(pb.logcounts, file = "~/results/PB_mean_logcounts_renormalized_with_subtypes.RDS")
+
+```
+
+```{r}
+pb.logcounts.old = readr::read_rds(file.path(dataset.path, "PB_sce_final.rds"))
+pb.logcounts.old = readr::read_rds(file.path(dataset.path, "PB_sce_final.rds"))
+
+
+metas = readr::read_rds("~/results/datasets/meta_data_final.rds")
+
+
+metas2 =data.frame(colData(pb.logcounts.old))
+
+readr::write_rds(pb.logcounts, file = "~/results/PB_mean_logcounts_renormalized_with_subtypes_annotated.RDS")
+
+
+```
+
+```{r}
+ACTIONet_summary = readr::read_rds(file.path(dataset.path, "ACTIONet_summary_filtered_individuals.rds"))
+
+pb.logcounts = readr::read_rds(file.path(dataset.path, "PB_sce_final.rds"))
+
+color.df = readRDS(file.path(dataset.path, "celltype_colors.rds"))
+
+colors = color.df$color
+names(colors) = color.df$celltype
+
+# int_colData(pb.logcounts)$n_cells = t(metadata(pb.logcounts)$n_cells)
+# metadata(pb.logcounts) = metadata(pb.logcounts)[c(1:2)]
+# ncells = t(apply(int_colData(pb.logcounts)$n_cells, 2, as.numeric))
+
+ncells = apply(metadata(pb.logcounts)$n_cells, 2, as.numeric)
+
+
+
+
+
+```
+
+# Prefilter outlier samples wrt ExNero %, or samples that have less than 500 cells (pruning from 140 -> 121 samples)
+```{r}
+rownames(ncells) = names(assays(pb.logcounts))
+cs = Matrix::colSums(ncells)
+ncells.freq = 100*scale(ncells, center = F, scale = cs)
+Ex.perc = (fast_column_sums(ncells.freq[grepl("^Ex", rownames(ncells.freq)) & !grepl("^Ex-NRGN", rownames(ncells.freq)), ]))
+
+ncells.freq = ncells.freq[, order(Ex.perc, decreasing = T)]
+Ex.perc = (fast_column_sums(ncells.freq[grepl("^Ex", rownames(ncells.freq)) & !grepl("^Ex-NRGN", rownames(ncells.freq)), ]))
+
+
+mask = (Ex.perc > 10)  & (Ex.perc < 80) & (fast_column_sums(ncells) > 500)
+
+# Samples that are depleted in Ex.perc:: 
+# # SZ15 0.2570694
+# # SZ3 2.8237585
+# # SZ24 3.7128713
+# # SZ29 7.5571178
+
+pb.logcounts.filtered = pb.logcounts[, mask]
+metadata(pb.logcounts.filtered)$n_cells = metadata(pb.logcounts.filtered)$n_cells[, mask]
+
+
+```
+
+# Performing cohort-specific DE
+```{r}
+form = ~ Phenotype + Batch + Gender + Age + PMI + Benzodiazepines + Anticonvulsants + AntipsychTyp + AntipsychAtyp + Antidepress
+
+resDE = lapply( levels(pb.logcounts.filtered$Cohort), function(chrt){
+
+	keep.ids = colnames(pb.logcounts.filtered)[pb.logcounts.filtered$Cohort == chrt]
+
+	pb.logcounts.filtered_sub = pb.logcounts.filtered[,keep.ids]
+	metadata(pb.logcounts.filtered_sub)$n_cells = metadata(pb.logcounts.filtered_sub)$n_cells[,keep.ids]
+
+	design.mat <- model.matrix(form, data = droplevels(colData(pb.logcounts.filtered_sub)))
+
+	colnames(design.mat)[1] = c("Intercept")
+
+	contrast.mat <- makeContrasts(contrasts = "PhenotypeSZ", levels = design.mat)
+
+	pbDS(pb.logcounts.filtered_sub, method = "limma-trend", min_cells = 5, design = design.mat, contrast =  contrast.mat, filter = "gene")
+})
+names(resDE) = levels(colData(pb.logcounts.filtered)$Cohort)
+
+readr::write_rds(resDE, file.path(dataset.path, "Cohort_specific_DE_results.rds"))
+
+
+
+```
+
+# Read bulk DE
+```{r}
+CMC.DE = read.table("~/results/input/CMC_MSSM-Penn-Pitt_DLPFC_mRNA_IlluminaHiSeq2500_gene-adjustedSVA-differentialExpression-includeAncestry-DxSCZ-DE.tsv", header = T)
+PEC.DE = read.table("~/results/input/Full_DE_table.csv", header = T)
+
+common.genes = intersect(rownames(pb.logcounts), intersect(CMC.DE$MAPPED_genes, PEC.DE$gene_name))
+
+CMC.tstat = CMC.DE$t[match(common.genes, CMC.DE$MAPPED_genes)]
+PEC.tstat = PEC.DE$SCZ.t.value[match(common.genes, PEC.DE$gene_name)]
+
+names(PEC.tstat) = names(CMC.tstat) = common.genes
+pval = cor.test(CMC.tstat, PEC.tstat, method = "spearman")$p.value
+
+McLean.PEC.cor.pvals = sapply(resDE$McLean$table$PhenotypeSZ, function(DF) {
+  tstats = DF$t
+  names(tstats) = DF$gene
+  cg = intersect(common.genes, DF$gene)
+  x = -log10(cor.test(tstats[cg], PEC.tstat[cg], method = "spearman")$p.value)
+  
+  return(x)
+})
+
+
+MtSinai.PEC.cor.pvals = sapply(resDE$MtSinai$table$PhenotypeSZ, function(DF) {
+  tstats = DF$t
+  names(tstats) = DF$gene
+  cg = intersect(common.genes, DF$gene)
+  x = -log10(cor.test(tstats[cg], PEC.tstat[cg], method = "spearman")$p.value)
+  
+  return(x)
+})
+
+
+McLean.CMC.cor.pvals = sapply(resDE$McLean$table$PhenotypeSZ, function(DF) {
+  tstats = DF$t
+  names(tstats) = DF$gene
+  cg = intersect(common.genes, DF$gene)
+  x = -log10(cor.test(tstats[cg], CMC.tstat[cg], method = "spearman")$p.value)
+  
+  return(x)
+})
+
+
+MtSinai.CMC.cor.pvals = sapply(resDE$MtSinai$table$PhenotypeSZ, function(DF) {
+  tstats = DF$t
+  names(tstats) = DF$gene
+  cg = intersect(common.genes, DF$gene)
+  x = -log10(cor.test(tstats[cg], CMC.tstat[cg], method = "spearman")$p.value)
+  
+  return(x)
+})
+
+df = data.frame(Celltypes = names(resDE$MtSinai$table$PhenotypeSZ), McLean.PEC = McLean.PEC.cor.pvals[names(resDE$MtSinai$table$PhenotypeSZ)], MtSinai.PEC = MtSinai.PEC.cor.pvals[names(resDE$MtSinai$table$PhenotypeSZ)], McLean.CMC = McLean.CMC.cor.pvals[names(resDE$MtSinai$table$PhenotypeSZ)], MtSinai.CMC = MtSinai.CMC.cor.pvals[names(resDE$MtSinai$table$PhenotypeSZ)])
+df$Combined = combine.logPvals(t(as.matrix(df[, -1])))
+df = df[order(df$Combined, decreasing = T), ]
+
+df2 = reshape2::melt(df)
+colnames(df2) = c("Celltype", "Test", "Enrichment")
+df2$Test = factor(as.character(df2$Test), c("Combined", "McLean.PEC", "MtSinai.PEC", "McLean.CMC", "MtSinai.CMC"))
+df2$Celltype = factor(df2$Celltype, df$Celltypes[order(df$Combined, decreasing = T)])
+
+require(ggpubr)
+gg =ggbarplot(df2, "Celltype", "Enrichment", fill = "Test", color = "black", palette = rev(pals::brewer.paired(5)),
+  position = position_dodge(0.9), xlab = "Celltype", ylab = "Enrichment")+ theme(axis.text.x = element_text(face="bold", size=8, angle=90,hjust=0.95,vjust=0.2, color = colors[levels(df2$Celltype)]), axis.text.y = element_text(face="bold", size=12, angle=0), axis.title = element_text(face="bold", size=18, angle=0))
+
+pdf(file.path(figures.folder, "DE_vs_bulk_v0.pdf"))
+plot(gg)
+dev.off()
+
+
+
+
+```
+
+```{r}
+X = log1p(ACTIONet_summary$unified_feature_specificity[common.genes, ])
+arch.SZ.CC = cor(X, abs(cbind(CMC.tstat, PEC.tstat)), method = "pearson")
+
+```
+
+# Prefiltering individual DE results before combining them
+Only keep genes that have 1) consistent direction of dysregulation across both datasets, and 2) at least 1 sd away from zero on the logFC scale
+
+```{r}
+celltypes = intersect(names(resDE$McLean$table$PhenotypeSZ), names(resDE$MtSinai$table$PhenotypeSZ))
+
+filtered.tables = lapply(celltypes, function(celltype) {
+  tbl1 = resDE[[1]]$table$PhenotypeSZ[[celltype]]
+  tbl2 = resDE[[2]]$table$PhenotypeSZ[[celltype]]
+  
+  genes = intersect(tbl1$gene[1 <= abs(tbl1$logFC/sd(tbl1$logFC))], tbl2$gene[1 <= abs(tbl2$logFC / sd(tbl2$logFC))])
+  
+  tbl1 = tbl1[match(genes, tbl1$gene), ]
+  tbl2 = tbl2[match(genes, tbl2$gene), ]
+  
+  mask = sign(tbl1$logFC)*sign(tbl2$logFC) > 0
+  tbl1 = tbl1[mask, ]
+  tbl2 = tbl2[mask, ]
+  
+  tbls = list(McClean = tbl1, MtSinai = tbl2) 
+  tbls = lapply( tbls, function(tab){
+    tab$se = tab$logFC / tab$t
+    tab
+  })
+  
+  return(tbls)
+})
+names(filtered.tables) = celltypes
+
+readr::write_rds(filtered.tables, file.path(dataset.path, "individual_diff_results_filtered.rds"))
+
+```
+
+
+
+```{r}
+# filtered.tables.old = readRDS("~/PFC_v3/individual_diff_results_filtered.rds")
+# 
+# i = 1
+X1 = filtered.tables.old$`Ex-CC_THEMIS`
+X2 = filtered.tables$`Ex-L6_CC_SEMA3A`
+
+
+cor(X1$McClean$t, X2$McClean$t)
+
+resDE.old = readr::read_rds("~/PFC_v3/filtered_resDE.rds")
+
+
+resDE.old$McLean$table$PhenotypeSZ$`Ex-CC_THEMIS`$t
+
+```
+
+

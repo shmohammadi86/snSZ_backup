@@ -1,0 +1,390 @@
+---
+title: "Compute ACTIONet per dataset"
+output: html_notebook
+---
+
+# Setup
+```{r include=FALSE}
+
+require(ACTIONet)
+require(stringr)
+require(ComplexHeatmap)
+
+
+dataset.path = "~/results/datasets/"
+results.path = "~/results"
+figures.folder = "~/results/figures"
+
+
+```
+
+# Read ACTIONet and convert to an SCE object
+```{r}
+ace = readr::read_rds("~/results/ACTIONet_reunified.rds")
+sce = as(ace, "SingleCellExperiment")
+
+ACTIONet_summary = readr::read_rds(file.path(dataset.path, "ACTIONet_summary.rds"))
+
+ACTIONet_summary.filtered = readr::read_rds(file.path(dataset.path, "ACTIONet_summary_filtered_individuals.rds"))
+
+pb.logcounts = readr::read_rds(file.path(dataset.path, "PB_mean_logcounts_final.RDS"))
+
+color.df = readRDS(file.path(dataset.path, "celltype_colors.rds"))
+
+```
+
+```{r}
+nrow(ACTIONet_summary$metadata)
+nrow(ACTIONet_summary.filtered$metadata)
+
+
+length(table(ACTIONet_summary$metadata$Individual))
+length(table(ACTIONet_summary.filtered$metadata$Individual))
+
+
+idx = match(ACTIONet_summary.filtered$metadata$Id, ACTIONet_summary$metadata$Id)
+filter.idx = setdiff(1:ncol(ace), idx)
+
+ace.filtered = ace[, idx]
+
+
+ace.McLean = ace.filtered[, ace.filtered$dataset == "DS1"]
+ace.MtSinai = ace.filtered[, ace.filtered$dataset == "DS2"]
+
+
+# ncol(ace)
+# 
+# 
+# length(table(ACTIONet_summary$metadata$Individual))
+# 
+# length(table(ACTIONet_summary$metadata$Individual))
+
+```
+
+```{r}
+ace.McLean = run.ACTIONet(ace.McLean, k_max = 40, thread_no = 42)
+ace.MtSinai = run.ACTIONet(ace.MtSinai, k_max = 40, thread_no = 42)
+
+readr::write_rds(ace.filtered, "~/results/ACTIONet_filtered_final.rds")
+readr::write_rds(ace.McLean, "~/results/ACTIONet_McLean_final.rds")
+readr::write_rds(ace.MtSinai, "~/results/ACTIONet_MtSinai_final.rds")
+
+
+```
+```{r}
+specs = list(Combined = ace.filtered$unified_feature_specificity, McLean = ace.McLean$unified_feature_specificity, MtSinai = ace.MtSinai$unified_feature_specificity)
+
+readr::write_rds(specs, "~/archetypes_gene_specs_individual_ACTIONets.rds")
+
+
+colors = color.df$color
+names(colors) = color.df$celltype
+# plot.ACTIONet(ace.McLean, ace.McLean$Labels.final, palette = colors)
+
+```
+```{r}
+arch.annot.McLean = annotate.archetypes.using.labels(ace.McLean, ace.McLean$Celltype)
+arch.annot.MtSinai = annotate.archetypes.using.labels(ace.MtSinai, ace.MtSinai$Celltype)
+arch.annot.Combined = annotate.archetypes.using.labels(ace.filtered, ace.filtered$Celltype)
+
+# kk1 = match(arch.annot.Combined$Label, color.df$old.celltype)
+# kk2 = match(arch.annot.McLean$Label, color.df$old.celltype)
+# kk3 = match(arch.annot.MtSinai$Label, color.df$old.celltype)
+
+
+```
+
+
+```{r}
+require(seriation)
+CC1 = cor(specs$Combined, specs$McLean)
+CC2 = cor(specs$Combined, specs$MtSinai)
+rownames(CC1) = rownames(CC2) = paste("A", 1:nrow(CC1), "-", color.df$celltype[kk1], sep = "")
+colnames(CC1) = paste("A", 1:ncol(CC1), "-", color.df$celltype[kk2], sep = "")
+colnames(CC2) = paste("A", 1:ncol(CC2), "-", color.df$celltype[kk3], sep = "")
+
+M1 = as(MWM_hungarian(1+t(CC1)), "dgTMatrix")
+M2 = as(MWM_hungarian(1+t(CC2)), "dgTMatrix")
+
+jj1 = M1@i+1
+jj2 = M2@i+1
+
+RdBu.pal = circlize::colorRamp2(seq(-0.75, 0.75, length.out = 7), rev(pals::brewer.rdbu(7)))
+
+colors = color.df$color
+names(colors) = color.df$celltype
+cc = colors[color.df$celltype[kk1]]
+cc1 = colors[color.df$celltype[kk2]]
+cc2 = colors[color.df$celltype[kk3]]
+
+# perm = get_order(seriate(as.dist(1-((cor(t(CC1)) + cor(t(CC2)))/2)), "OLO"))
+perm = c(setdiff(order(kk1), c(7, 11, 17, 29)), c(7, 17, 11, 29))
+X1 = CC1[perm, jj1[perm]]
+X2 = CC2[perm, jj2[perm]]
+pdf("~/results/figures/archetype_mapping.pdf", width = 14, height = 8)
+Heatmap(X1, cluster_columns = F, cluster_rows = F, row_title = "Combined", column_title = "McLean", rect_gp = gpar(col = "black"), name = "Correlation", row_names_side = "left", col = RdBu.pal, row_names_gp = gpar(col = cc[perm]), column_names_gp = gpar(col = cc1[jj1[perm]])) + Heatmap(X2, cluster_columns = F, cluster_rows = F, row_title = "Combined", column_title = "MtSinai", rect_gp = gpar(col = "black"), name = "Correlation", row_names_side = "left", col = RdBu.pal, column_names_gp = gpar(col = cc2[jj2[perm]]))
+dev.off()
+
+
+
+
+
+
+```
+
+```{r}
+spec.full.McLean = compute_archetype_feature_specificity(logcounts(ace.McLean), as.matrix(t(colMaps(ace.McLean)$H_stacked)))
+spec.full.MtSinai = compute_archetype_feature_specificity(logcounts(ace.MtSinai), as.matrix(t(colMaps(ace.MtSinai)$H_stacked)))
+
+ace.filtered$Celltype = color.df$celltype[match(ace.filtered$Labels.final, color.df$old.celltype)]
+ace.McLean$Celltype = color.df$celltype[match(ace.McLean$Labels.final, color.df$old.celltype)]
+ace.MtSinai$Celltype = color.df$celltype[match(ace.MtSinai$Labels.final, color.df$old.celltype)]
+
+arch.annot.McLean.full = annotate.archetypes.using.labels(ace.McLean, ace.McLean$Celltype, archetype.slot = "H_stacked")
+# arch.annot.Combined.full = annotate.archetypes.using.labels(ace.filtered, ace.filtered$Celltype, archetype.slot = "H_stacked")
+arch.annot.MtSinai.full = annotate.archetypes.using.labels(ace.MtSinai, ace.MtSinai$Celltype, archetype.slot = "H_stacked")
+
+
+
+
+
+```
+
+```{r}
+require(seriation)
+CC1 = cor(specs$Combined, spec.full.McLean$upper_significance)
+CC2 = cor(specs$Combined, spec.full.MtSinai$upper_significance)
+rownames(CC1) = rownames(CC2) = paste("A", 1:nrow(CC1), "-", color.df$celltype[kk1], sep = "")
+colnames(CC1) = paste("A", 1:ncol(CC1), "-", arch.annot.McLean.full$Label, sep = "")
+colnames(CC2) = paste("A", 1:ncol(CC2), "-", arch.annot.MtSinai.full$Label, sep = "")
+
+M1 = as(MWM_hungarian(1+t(CC1)), "dgTMatrix")
+M2 = as(MWM_hungarian(1+t(CC2)), "dgTMatrix")
+
+jj1 = M1@i+1
+jj2 = M2@i+1
+
+RdBu.pal = circlize::colorRamp2(seq(-0.75, 0.75, length.out = 7), rev(pals::brewer.rdbu(7)))
+
+colors = color.df$color
+names(colors) = color.df$celltype
+cc = colors[color.df$celltype[kk1]]
+cc1 = colors[arch.annot.McLean.full$Label]
+cc2 = colors[arch.annot.MtSinai.full$Label]
+
+# perm = get_order(seriate(as.dist(1-((cor(t(CC1)) + cor(t(CC2)))/2)), "OLO"))
+perm = c(setdiff(order(kk1), c(7, 11, 17, 29)), c(7, 17, 11, 29))
+X1 = CC1[perm, jj1[perm]]
+X2 = CC2[perm, jj2[perm]]
+pdf("~/results/figures/archetype_mapping_full.pdf", width = 14, height = 8)
+Heatmap(X1, cluster_columns = F, cluster_rows = F, row_title = "Combined", column_title = "McLean", rect_gp = gpar(col = "black"), name = "Correlation", row_names_side = "left", col = RdBu.pal, row_names_gp = gpar(col = cc[perm]), column_names_gp = gpar(col = cc1[jj1[perm]])) + Heatmap(X2, cluster_columns = F, cluster_rows = F, row_title = "Combined", column_title = "MtSinai", rect_gp = gpar(col = "black"), name = "Correlation", row_names_side = "left", col = RdBu.pal, column_names_gp = gpar(col = cc2[jj2[perm]]))
+dev.off()
+
+
+```
+
+```{r}
+
+
+
+unified_archetypes = list(Combined = list(archetype_footprint = ace.filtered$archetype_footprint, unified_feature_specificity = ace.filtered$unified_feature_specificity, annotations = arch.annot.Combined$Enrichment, labels = arch.annot.Combined$Label), McLean = list(archetype_footprint = ace.McLean$archetype_footprint, unified_feature_specificity = ace.McLean$unified_feature_specificity, annotations = arch.annot.McLean$Enrichment, labels = arch.annot.McLean$Label), MtSinai = list(archetype_footprint = ace.MtSinai$archetype_footprint, unified_feature_specificity = ace.MtSinai$unified_feature_specificity, annotations = arch.annot.MtSinai$Enrichment, labels = arch.annot.MtSinai$Label))
+
+readr::write_rds(unified_archetypes, "~/results/unified_archetypes_plus_individual_ACTIONets.rds")
+
+
+
+full_archetypes = list(McLean = list(H_stacked = colMaps(ace.McLean)$H_stacked, profile = spec.full.McLean$archetypes, specificity = spec.full.McLean$upper_significance, annotations = arch.annot.McLean.full$Enrichment, labels = arch.annot.McLean.full$Label), MtSinai = list(H_stacked = colMaps(ace.MtSinai)$H_stacked, profile = spec.full.MtSinai$archetypes, specificity = spec.full.MtSinai$upper_significance, annotations = arch.annot.MtSinai.full$Enrichment, labels = arch.annot.MtSinai.full$Label))
+
+readr::write_rds(full_archetypes, "~/results/Full_archetypes_individual_ACTIONets.rds")
+
+
+
+
+```
+
+```{r}
+DE.new = readRDS("~/results/datasets/DE_genes_pseudobulk.rds")
+
+Up.genes = DE.new$Up.genes
+Down.genes = DE.new$Down.genes
+DE.scores = sign(DE.new$logFC) * (DE.new$logPvals) # tstats
+DE.scores.sig = DE.scores
+DE.scores.sig[(abs(DE.new$logFC) < 0.1) | (DE.new$logPvals < -log10(0.05))] = 0
+
+```
+
+
+```{r}
+McLean.enrichment = assess.geneset.enrichment.from.scores(scores = ace.McLean$unified_feature_specificity, DE.new$Down.genes)
+X1 = McLean.enrichment$logPvals
+colnames(X1) = colnames(CC1)
+
+McLean.enrichment = assess.geneset.enrichment.from.scores(scores = ace.MtSinai$unified_feature_specificity, DE.new$Down.genes)
+X2 = McLean.enrichment$logPvals
+colnames(X2) = colnames(CC2)
+
+
+pdf("~/results/figures/individual_archetypes_vs_DE_genes.pdf", width = 14, height = 6)
+Heatmap(X1, show_column_dend = F, show_row_dend = F, cluster_rows = F, row_names_side = "left", row_names_gp = gpar(col = colors), rect_gp = gpar(col = "black"), name = "Enrichment") + Heatmap(X2, show_column_dend = F, show_row_dend = F, cluster_rows = F, row_names_side = "left", row_names_gp = gpar(col = colors), rect_gp = gpar(col = "black"), name = "Enrichment") 
+dev.off()
+
+
+
+
+```
+
+
+```{r}
+
+DE = c(DE.new$Up.genes, DE.new$Down.genes)
+names(DE) = c(paste("Up", names(DE.new$Up.genes), sep = "_"), paste("Down", names(DE.new$Down.genes), sep = "_"))
+
+
+
+set.seed(0)
+SZTR.McLean = ace.McLean$unified_feature_specificity[, 18]
+DE.enrich.McLean = fgsea::fgsea(DE, SZTR.McLean)
+saveRDS(DE.enrich.McLean, "~/results/datasets/McLean_SZTR_vs_DE.rds")
+
+
+SZTR.MtSinai = ace.McLean$unified_feature_specificity[, 30]
+DE.enrich.MtSinai = fgsea::fgsea(DE, SZTR.MtSinai)
+saveRDS(DE.enrich.MtSinai, "~/results/datasets/MtSinai_SZTR_vs_DE.rds")
+
+
+# data:  log1p(SZTR.McLean) and log1p(SZTR.MtSinai)
+# t = 42.507, df = 17656, p-value < 2.2e-16
+# alternative hypothesis: true correlation is not equal to 0
+# 95 percent confidence interval:
+#  0.2912497 0.3180110
+# sample estimates:
+#       cor 
+# 0.3046904 
+# stats$p.value == 0
+stats = cor.test(log1p(SZTR.McLean), log1p(SZTR.MtSinai))
+
+
+
+```
+
+
+```{r}
+Common.genes = lapply(1:nrow(DE.enrich.McLean), function(i) {
+  sort(unique(intersect(DE.enrich.McLean$leadingEdge[[i]], DE.enrich.MtSinai$leadingEdge[[i]])))
+})
+
+names(Common.genes) = DE.enrich.McLean$pathway
+
+readr::write_rds(Common.genes, "~/results/SZTR_common_genes_across_datasets.rds")
+
+
+
+
+```
+
+
+```{r}
+x1 = annotate.archetypes.using.labels(ace.McLean, ace.McLean$Phenotype)
+x2 = annotate.archetypes.using.labels(ace.MtSinai, ace.MtSinai$Phenotype)
+
+# Heatmap(x1$Enrichment)
+# Heatmap(x2$Enrichment)
+
+```
+```{r}
+# order(SZTR.McLean, decreasing = T)[1:20], order(SZTR.McLean, decreasing = T)[1:20]
+
+intersect(names(sort(SZTR.McLean, decreasing = T)[1:20]), names(sort(SZTR.MtSinai, decreasing = T)[1:20]))
+
+
+# Z = scale(cbind(SZTR.McLean, SZTR.MtSinai))
+
+```
+
+
+
+```{r}
+xx = scale(sapply(split(ace.McLean$archetype_footprint[, 18], droplevels(ace.McLean$Individual)), mean))
+ii = match(rownames(xx), pb.logcounts$Internal_ID)
+df1 = data.frame(TPS = pb.logcounts$TPS[ii], SZTR = xx, Phenotype = pb.logcounts$Phenotype[ii])
+cor(df1$TPS, df1$SZTR) # -0.7134271
+cor.test(df1$TPS, df1$SZTR) # t = -6.9052, df = 46, p-value = 1.264e-08
+
+
+require(ggpubr)
+gg = ggscatter(df1, x = "TPS", y = "SZTR", 
+          color = "Phenotype",
+          palette = c("CON" = "lightgray", "SZ" = "red"),
+          add = "reg.line",                                 # Add regression line
+          conf.int = TRUE,                                  # Add confidence interval
+          add.params = list(color = "blue",
+                            fill = "lightgray")
+          ) + geom_vline(xintercept = -1, linetype = "dashed", color="gray") + geom_vline(xintercept = 1, linetype = "dashed", color="gray")+
+  stat_cor(method = "pearson")#  +xlim(c(-2, 2)) + ylim(c(-2, 2))
+
+pdf("~/results/figures/McLean_SZTR_vs_TPS_scatter.pdf")
+plot(gg)
+dev.off()
+
+
+
+
+xx2 = scale(sapply(split(ace.MtSinai$archetype_footprint[, 30], droplevels(ace.MtSinai$Individual)), mean))
+ii2 = match(rownames(xx2), pb.logcounts$Internal_ID)
+
+df2 = data.frame(TPS = pb.logcounts$TPS[ii2], SZTR = xx2, Phenotype = pb.logcounts$Phenotype[ii2])
+cor(df2$TPS, df2$SZTR) # -0.7134271
+cor.test(df2$TPS, df2$SZTR) # t = -6.9052, df = 46, p-value = 1.264e-08
+
+
+require(ggpubr)
+gg = ggscatter(df2, x = "TPS", y = "SZTR", 
+          color = "Phenotype",
+          palette = c("CON" = "lightgray", "SZ" = "red"),
+          add = "reg.line",                                 # Add regression line
+          conf.int = TRUE,                                  # Add confidence interval
+          add.params = list(color = "blue",
+                            fill = "lightgray")
+          ) + geom_vline(xintercept = -1, linetype = "dashed", color="gray") + geom_vline(xintercept = 1, linetype = "dashed", color="gray")+
+  stat_cor(method = "pearson")#  +xlim(c(-2, 2)) + ylim(c(-2, 2))
+
+pdf("~/results/figures/MtSinai_SZTR_vs_TPS_scatter.pdf")
+plot(gg)
+dev.off()
+
+
+```
+
+
+
+```{r}
+x = readr::read_rds("~/results/datasets/SZTR_vs_DE_shared_genes_gProfiler_filtered.rds")
+
+```
+
+
+```{r}
+
+gs = list(shared = shared.genes)
+
+set.seed(0)
+shared.enrich.DS1 = fgsea::fgsea(gs, SZTR.McLean) # 0.001113701, 133 genes
+shared.enrich.DS2 = fgsea::fgsea(gs, SZTR.MtSinai) # 5.173198e-09, 117 genes
+
+SZTR.genes = list(Joint = shared.genes, McLean = shared.enrich.DS1$leadingEdge[[1]], MtSinai = shared.enrich.DS2$leadingEdge[[1]])
+
+
+df = data.frame(genes = SZTR.genes$Joint, McLean = SZTR.genes$Joint %in% SZTR.genes$McLean, MtSinai = SZTR.genes$Joint %in% SZTR.genes$MtSinai)
+df$Both = df$McLean & df$MtSinai
+write.table(df, file.path(tables.path, "Shared_SZTR_genes_vs_individual_ds.tsv"), sep = "\t", row.names = F, col.names = T, quote = F)
+
+
+
+
+gg = list(Joint = setdiff(SZTR.genes$Joint, union(SZTR.genes$McLean, SZTR.genes$MtSinai)), McLean = setdiff(SZTR.genes$McLean, union(SZTR.genes$MtSinai, SZTR.genes$Joint)), MtSinai = setdiff(SZTR.genes$MtSinai, union(SZTR.genes$McLean, SZTR.genes$Joint)), "Joint&McLean" = setdiff(union(SZTR.genes$Joint, SZTR.genes$McLean), SZTR.genes$MtSinai), "Joint&MtSinai" = setdiff(union(SZTR.genes$Joint, SZTR.genes$MtSinai), SZTR.genes$McLean), "McLean&MtSinai" = setdiff(union(SZTR.genes$MtSinai, SZTR.genes$McLean), SZTR.genes$Joint), "Joint&McLean&MtSinai" = intersect(SZTR.genes$Joint, intersect(SZTR.genes$McLean, SZTR.genes$MtSinai)))
+
+
+
+
+```
+
